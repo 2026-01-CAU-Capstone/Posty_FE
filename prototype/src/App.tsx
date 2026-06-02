@@ -255,7 +255,7 @@ export default function App() {
   return (
     <div className="page">
       <header className="hd">
-        <div className="logo"><Posty size={46} working={stage0Running || mainRunning} /><h1>Posty</h1></div>
+        <div className="logo"><Posty size={46} variant="logo" working={stage0Running || mainRunning} /><h1>Posty</h1></div>
         <p>레퍼런스 릴스의 스타일로 내 영상을 자동 편집</p>
         <span className={'status ' + (online ? 'on' : online === false ? 'off' : '')}>
           {online == null ? '서버 확인 중…' : online ? '백엔드 연결됨' : '백엔드 미연결 (cd backend → npm run dev)'}
