@@ -40,6 +40,13 @@ export type Estimate = {
   total14: number;
 };
 
+// ⚠ 아래 DTO 들(SuggestBrief, AnalysisPoint, StyleSuggest, TtsConfig/TtsSource/
+//   TtsGenMode, AudioConfig/OriginalVolume, TTS_VOICES)은 백엔드 타입의 수작업 미러다.
+//   - SuggestBrief / AnalysisPoint / StyleSuggest → lib/style-suggest.ts
+//   - TtsConfig / TtsSource / TtsGenMode          → lib/tts-config.ts
+//   - AudioConfig / OriginalVolume                → lib/audio-config.ts
+//   - TTS_VOICES                                  → lib/tts.ts PREBUILT_VOICES
+//   백엔드에서 필드를 바꾸면 여기도 같이 고쳐야 한다 (공유 모듈 없음).
 export type SuggestBrief = {
   tone: string;
   purpose: string;
@@ -49,11 +56,69 @@ export type SuggestBrief = {
   caption_density: '' | 'every_cut' | 'most_cuts' | 'occasional' | 'minimal' | 'none';
 };
 
+export type AnalysisPoint = {
+  label: string;
+  detail: string;
+};
+
 export type StyleSuggest = {
   summary: string;
+  analysis: AnalysisPoint[];
   brief: SuggestBrief;
   generated_at: string;
   model: string;
+};
+
+// ---- TTS (나레이션) 설정 ----
+export type TtsSource = 'captions' | 'generate';
+export type TtsGenMode = 'auto' | 'manual';
+export type TtsConfig = {
+  enabled: boolean;
+  source: TtsSource;
+  genMode: TtsGenMode;
+  voice: string;
+  script: string;
+};
+export const TTS_VOICES = ['Kore', 'Puck', 'Charon', 'Aoede', 'Fenrir', 'Leda', 'Orus', 'Zephyr'] as const;
+
+// ---- 오디오 밸런스 설정 ----
+export type OriginalVolume = 'mute' | 'low' | 'full';
+export type AudioConfig = {
+  originalVolume: OriginalVolume;
+};
+
+export type PreviewFrame = {
+  url: string;
+  source: 'reference' | 'source';
+  sourceFile: string;
+};
+
+export type BgmCandidate = {
+  identifier: string;
+  title?: string;
+  source_url: string;
+  duration_sec: number;
+  size_bytes: number;
+  query_used: string;
+};
+
+export type ReferenceBgm = {
+  status: 'no_token' | 'no_match' | 'matched' | 'error';
+  title?: string;
+  artist?: string;
+  album?: string;
+  release_date?: string;
+  genres?: string[];
+  song_link?: string;
+  spotify_url?: string;
+  apple_url?: string;
+};
+
+export type BgmCandidatesResp = {
+  referenceBgm: ReferenceBgm | null;
+  candidates: BgmCandidate[];
+  profile: any | null;
+  cached: boolean;
 };
 
 export type StyleBrief = {
@@ -102,7 +167,19 @@ export const api = {
     return jsonReq('/api/project?projectId=' + encodeURIComponent(projectId));
   },
 
-  async run(projectId: string, opts: { mode: 'all' | 'stage'; stage?: number; from?: number; to?: number }): Promise<string> {
+  async run(
+    projectId: string,
+    opts: {
+      mode: 'all' | 'stage';
+      stage?: number;
+      from?: number;
+      to?: number;
+      // Stage 0 전용 — "다시 분석하기" 호출 시.
+      // 백엔드에서 이전 edit-spec.json 을 프롬프트에 끼워 보강 분석을 돌린다.
+      reanalyze?: boolean;
+      userFocus?: string;
+    },
+  ): Promise<string> {
     const d = await jsonReq('/api/run', { method: 'POST', body: JSON.stringify({ projectId, ...opts }) });
     return d.jobId as string;
   },
@@ -139,8 +216,56 @@ export const api = {
     return d.suggest as StyleSuggest;
   },
 
+  // TTS 설정 저장
+  async saveTtsConfig(projectId: string, tts: Partial<TtsConfig>): Promise<void> {
+    await jsonReq('/api/tts-config', { method: 'POST', body: JSON.stringify({ projectId, tts }) });
+  },
+
+  // 오디오 밸런스(원본 음량) 저장
+  async saveAudioConfig(projectId: string, audio: Partial<AudioConfig>): Promise<void> {
+    await jsonReq('/api/audio-config', { method: 'POST', body: JSON.stringify({ projectId, audio }) });
+  },
+
+  // 레퍼런스 분석 결과(edit-spec.json) 전체 — 디버그 표시용
+  async getEditSpec(projectId: string): Promise<any | null> {
+    const d = await jsonReq('/api/edit-spec?projectId=' + encodeURIComponent(projectId));
+    return d.spec ?? null;
+  },
+
   fileUrl(relPath: string): string {
     return BASE + '/api/file?path=' + encodeURIComponent(relPath);
+  },
+
+  // 진행 화면 캐러셀용 — 레퍼런스 + 소스에서 N개 프레임 추출
+  async getPreviewFrames(projectId: string, count = 16): Promise<PreviewFrame[]> {
+    const d = await jsonReq(
+      '/api/preview-frames?projectId=' + encodeURIComponent(projectId) +
+      '&count=' + encodeURIComponent(String(count))
+    );
+    return (d.frames || []).map((f: any) => ({
+      url: BASE + f.url,
+      source: f.source,
+      sourceFile: f.sourceFile,
+    }));
+  },
+
+  // BGM 후보 — 캐시 우선
+  async getBgmCandidates(projectId: string, force = false): Promise<BgmCandidatesResp> {
+    const d = await jsonReq(
+      '/api/bgm-candidates?projectId=' + encodeURIComponent(projectId) +
+      (force ? '&force=1' : '')
+    );
+    return {
+      referenceBgm: d.referenceBgm || null,
+      candidates: d.candidates || [],
+      profile: d.profile || null,
+      cached: !!d.cached,
+    };
+  },
+
+  // BGM 선택 (다운로드)
+  async pickBgm(projectId: string, pick: { identifier: string; source_url: string; title?: string } | { none: true }): Promise<void> {
+    await jsonReq('/api/bgm-pick', { method: 'POST', body: JSON.stringify({ projectId, ...pick }) });
   },
 
   // 디버그용: raw-api-responses.json 누적 entries (마지막 limit 개만)
