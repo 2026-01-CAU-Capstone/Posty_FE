@@ -1,15 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, Estimate, Job, StyleBrief, StyleSuggest, SuggestBrief } from './api';
+import { api, BgmCandidate, BgmCandidatesResp, Estimate, Job, OriginalVolume, PreviewFrame, StyleBrief, StyleSuggest, SuggestBrief, TtsGenMode, TtsSource, TTS_VOICES } from './api';
 import { Posty } from './Posty';
 
 const STAGE_NAMES = ['레퍼런스 분석', '컷편집', '색보정', '자막', '음성·BGM'];
 
-type Step = 'ref' | 'sources' | 'waiting' | 'options' | 'run';
+type Step = 'ref' | 'sources' | 'waiting' | 'options' | 'bgm' | 'run';
 const STEPS: { key: Step; label: string }[] = [
   { key: 'ref',      label: '레퍼런스' },
   { key: 'sources',  label: '소스' },
   { key: 'waiting',  label: '분석 대기' },
   { key: 'options',  label: '옵션' },
+  { key: 'bgm',      label: 'BGM 고르기' },
   { key: 'run',      label: '생성' },
 ];
 
@@ -52,14 +53,39 @@ function usePolledJob(jobId: string | null): Job | null {
   return job;
 }
 
+// rAF 기반 시계 — 진행 바가 매 프레임 부드럽게 갱신되도록.
+// (active 일 때만 회전. inactive 면 멈춰서 불필요한 렌더 안 함.)
 function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active) return;
-    const t = setInterval(() => setNow(Date.now()), 500);
-    return () => clearInterval(t);
+    let raf = 0;
+    let alive = true;
+    let last = 0;
+    const tick = (ts: number) => {
+      if (!alive) return;
+      // ~10Hz 로 throttle — bar 의 width transition 이 자연스럽게 부드러워지면서도
+      // React 리렌더 비용은 100ms 마다라 가벼움.
+      if (ts - last >= 100) {
+        last = ts;
+        setNow(Date.now());
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => { alive = false; cancelAnimationFrame(raf); };
   }, [active]);
   return now;
+}
+
+// 정확한 분/초 ticking 표시 — "5분 43초 남음" 처럼 1초마다 시각적으로 줄어든다.
+function fmtClockTicking(sec: number): string {
+  const s = Math.max(0, Math.ceil(sec));
+  if (s <= 0) return '잠시 후 완료';
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (m === 0) return `${r}초 남음`;
+  return `${m}분 ${String(r).padStart(2, '0')}초 남음`;
 }
 
 function fmtClock(sec: number): string {
@@ -67,6 +93,19 @@ function fmtClock(sec: number): string {
   const m = Math.floor(s / 60);
   const r = s % 60;
   return m > 0 ? `${m}분 ${r}초` : `${r}초`;
+}
+
+// 사용자에게 보여줄 "현실적인" 예상 시간 — 초 단위로 반올림하지 않고
+// 분 단위 범위 ("약 6~7분") 로 표시. 60초 미만은 "1분 이내" 로.
+// 보수 계수(SAFETY=1.6)가 백엔드에 끼어 있어 실제보다 길게 잡혀 있으므로
+// 표시 단계에서 0.75 를 곱해 좀 더 현실적인 범위로 좁혀 보여준다.
+function fmtClockRange(sec: number): string {
+  if (!isFinite(sec) || sec <= 0) return '잠시 후 완료';
+  const realistic = sec * 0.75;
+  if (realistic < 60) return '약 1분 이내';
+  const lo = Math.max(1, Math.floor(realistic / 60));
+  const hi = Math.max(lo + 1, Math.ceil((realistic * 1.15) / 60));
+  return lo === hi ? `약 ${lo}분` : `약 ${lo}~${hi}분`;
 }
 
 type PhaseProg = { pct: number; eta: number; currentStage: number };
@@ -122,22 +161,181 @@ export default function App() {
   const [purposePool, setPurposePool] = useState<string[]>([]);
   const [extraNotes, setExtraNotes] = useState('');
 
+  // 오디오 밸런스 — 기본은 음원(BGM)만. 사용자가 원본 영상 소리를 키울 수 있음.
+  const [originalAudio, setOriginalAudio] = useState<OriginalVolume>('mute');
+
+  // TTS(나레이션) 옵션 트리
+  const [ttsEnabled, setTtsEnabled] = useState(false);
+  const [ttsSource, setTtsSource] = useState<TtsSource>('captions');     // 자막 읽기 | 새로 생성
+  const [ttsGenMode, setTtsGenMode] = useState<TtsGenMode>('auto');      // 자동 생성 | 수동 작업
+  const [ttsScript, setTtsScript] = useState('');                        // 수동 작업 대본
+  const [ttsVoice, setTtsVoice] = useState<string>('Kore');
+
   const [stage0JobId, setStage0JobId] = useState<string | null>(null);
   const [mainJobId, setMainJobId] = useState<string | null>(null);
   const [genError, setGenError] = useState('');
+
+  // BGM 선택 상태
+  const [bgmResp, setBgmResp] = useState<BgmCandidatesResp | null>(null);
+  const [bgmBusy, setBgmBusy] = useState(false);
+  const [bgmError, setBgmError] = useState('');
+  const [bgmPick, setBgmPick] = useState<'none' | string | null>(null); // identifier or 'none'
+  const [bgmPickBusy, setBgmPickBusy] = useState(false);
+
+  // 진행 화면 캐러셀 프레임
+  const [previewFrames, setPreviewFrames] = useState<PreviewFrame[]>([]);
+
+  // 완료 알림을 1회만 발사하기 위한 가드
+  const completedNotifiedRef = useRef(false);
+
+  // 자동 재시도 상태 — Stage 0 / main job 둘 다 따로 카운트
+  const [stage0Retry, setStage0Retry] = useState(0);
+  const [stage0Retrying, setStage0Retrying] = useState(false);
+  const [mainRetry, setMainRetry] = useState(0);
+  const [mainRetrying, setMainRetrying] = useState(false);
+  const MAX_RETRIES = 3;
 
   const stage0Job = usePolledJob(stage0JobId);
   const mainJob = usePolledJob(mainJobId);
 
   const stage0Done = stage0Job?.status === 'done';
-  const stage0Error = stage0Job?.status === 'error';
-  const stage0Running = refStarted && !stage0Done && !stage0Error;
+  const stage0Running = refStarted && !stage0Done && stage0Job?.status !== 'error';
   const mainRunning = !!mainJob && mainJob.status !== 'done' && mainJob.status !== 'error';
   const now = useNow(stage0Running || mainRunning);
 
   const finalPath: string | null = mainJob?.status === 'done' ? (mainJob.result?.final ?? null) : null;
 
   useEffect(() => { api.health().then(setOnline); }, []);
+
+  // 'bgm' 화면 진입 시 후보 자동 fetch (Stage 0 가 끝나 있어야 함)
+  useEffect(() => {
+    if (step !== 'bgm') return;
+    if (!projectId || !stage0Done) return;
+    if (bgmResp || bgmBusy) return;
+    let cancelled = false;
+    (async () => {
+      setBgmBusy(true);
+      setBgmError('');
+      try {
+        const r = await api.getBgmCandidates(projectId);
+        if (cancelled) return;
+        setBgmResp(r);
+        // 기본 선택: 첫번째 후보
+        if (r.candidates.length > 0) setBgmPick(r.candidates[0].identifier);
+        else setBgmPick('none');
+      } catch (e: any) {
+        if (!cancelled) setBgmError(e.message || String(e));
+      } finally {
+        if (!cancelled) setBgmBusy(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [step, projectId, stage0Done]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 진행 화면 진입 시 프레임 캐러셀 fetch
+  useEffect(() => {
+    if (step !== 'run' || !projectId) return;
+    if (previewFrames.length > 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const frames = await api.getPreviewFrames(projectId, 16);
+        if (!cancelled) setPreviewFrames(frames);
+      } catch { /* 캐러셀 실패해도 무시 */ }
+    })();
+    return () => { cancelled = true; };
+  }, [step, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── 자동 재시도: Stage 0 ──────────────────────────────────────
+  // job.status='error' 가 되면 backoff 후 같은 stage 를 다시 큐잉.
+  // MAX_RETRIES 까지 시도. (보통은 일시적 429/네트워크라 1~2번 안에 통과.)
+  useEffect(() => {
+    if (!projectId) return;
+    if (stage0Job?.status !== 'error') return;
+    if (stage0Retry >= MAX_RETRIES) return;
+    if (stage0Retrying) return;
+    const delay = Math.min(8000, 1500 * Math.pow(2, stage0Retry));
+    setStage0Retrying(true);
+    const timer = setTimeout(async () => {
+      try {
+        const newId = await api.run(projectId, { mode: 'stage', stage: 0 });
+        setStage0Retry(r => r + 1);
+        setStage0JobId(newId);
+      } catch {
+        // 재시도 자체가 실패하면 다음 사이클로 — 카운트는 올린다.
+        setStage0Retry(r => r + 1);
+      } finally {
+        setStage0Retrying(false);
+      }
+    }, delay);
+    return () => { clearTimeout(timer); setStage0Retrying(false); };
+  }, [stage0Job?.status, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── 자동 재시도: 메인 job (Stage 1~4) ─────────────────────────
+  // error 면 progress 에서 마지막으로 완료된 stage 를 찾아 그 다음부터 재실행.
+  // 완료된 stage 의 산출물(cut.mp4 등)은 그대로 남아 있어서 다음 stage 가 이어 진행 가능.
+  useEffect(() => {
+    if (!projectId) return;
+    if (mainJob?.status !== 'error') return;
+    if (mainRetry >= MAX_RETRIES) return;
+    if (mainRetrying) return;
+    let lastDone = 0;
+    for (const p of mainJob.progress || []) {
+      if (p.step.endsWith('_done') && typeof p.extra?.stage === 'number') {
+        lastDone = Math.max(lastDone, p.extra.stage);
+      }
+    }
+    const restartFrom = Math.max(1, lastDone + 1);
+    const delay = Math.min(8000, 1500 * Math.pow(2, mainRetry));
+    setMainRetrying(true);
+    const timer = setTimeout(async () => {
+      try {
+        const newId = await api.run(projectId, { mode: 'all', from: restartFrom, to: 4 });
+        setMainRetry(r => r + 1);
+        setMainJobId(newId);
+      } catch {
+        setMainRetry(r => r + 1);
+      } finally {
+        setMainRetrying(false);
+      }
+    }, delay);
+    return () => { clearTimeout(timer); setMainRetrying(false); };
+  }, [mainJob?.status, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Hang 감지: 예상 시간 × 2.5 를 초과하면 강제 재시작 ───────
+  // (apt timeout for stuck network/API rather than waiting forever)
+  useEffect(() => {
+    if (!projectId || !estimate) return;
+    if (stage0Job?.status !== 'running') return;
+    if (stage0Retry >= MAX_RETRIES) return;
+    const start = stage0Job.startedAt ? Date.parse(stage0Job.startedAt) : Date.now();
+    const expected = estimate.perStage[0] || 60;
+    const hangAfter = expected * 2.5 * 1000;
+    const elapsed = Date.now() - start;
+    const remaining = Math.max(1000, hangAfter - elapsed);
+    const timer = setTimeout(async () => {
+      try {
+        const newId = await api.run(projectId, { mode: 'stage', stage: 0 });
+        setStage0Retry(r => r + 1);
+        setStage0JobId(newId);
+      } catch { /* 다음 사이클 */ }
+    }, remaining);
+    return () => clearTimeout(timer);
+  }, [stage0Job?.id, stage0Job?.status, projectId, estimate]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 완료 시 브라우저 알림 (사용자가 탭을 닫아도 알 수 있게)
+  useEffect(() => {
+    if (!mainJob || mainJob.status !== 'done') return;
+    if (completedNotifiedRef.current) return;
+    completedNotifiedRef.current = true;
+    try {
+      if (typeof Notification !== 'undefined') {
+        if (Notification.permission === 'granted') {
+          new Notification('Posty 영상 생성 완료', { body: '편집된 영상이 준비됐어요. 탭으로 돌아와서 확인해보세요.' });
+        }
+      }
+    } catch { /* 무시 */ }
+  }, [mainJob?.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Stage 0 가 끝나는 순간 (waiting 화면에서) 자동으로 style-suggest 호출
   useEffect(() => {
@@ -173,6 +371,29 @@ export default function App() {
 
   async function refreshEstimate(pid: string) {
     try { setEstimate(await api.getEstimate(pid)); } catch { /* 무시 */ }
+  }
+
+  // "다시 분석하기" — Stage 0 만 reanalyze=true 로 다시 큐잉.
+  // 백엔드가 이전 edit-spec.json 을 프롬프트에 끼워 second-pass 로 돌린다.
+  // 캐시된 suggest 도 비워서, 새 spec 이 나오면 useEffect 가 자동으로 다시 추천 재생성.
+  async function reanalyzeReference(userFocus: string) {
+    if (!projectId) return;
+    setSuggest(null);
+    setSuggestError('');
+    setRefError('');
+    setStage0Retry(0);
+    setStage0Retrying(false);
+    try {
+      const newId = await api.run(projectId, {
+        mode: 'stage',
+        stage: 0,
+        reanalyze: true,
+        userFocus: userFocus.trim() || undefined,
+      });
+      setStage0JobId(newId);
+    } catch (e: any) {
+      setRefError(e.message || String(e));
+    }
   }
 
   async function startReference() {
@@ -218,6 +439,40 @@ export default function App() {
     }
   }
 
+  // BGM 패널의 "이 음원으로 생성" 버튼이 호출하는 함수.
+  // (1) Notification 권한은 await 이전에 요청해야 일부 브라우저(Safari)에서 user-gesture 가
+  //     끊기지 않는다. (2) 다운로드 → 생성 시작.
+  async function confirmBgmAndGenerate() {
+    if (!projectId || !bgmPick) return;
+    // (1) — user-gesture 컨텍스트가 살아 있을 때 즉시 요청
+    try {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {});
+      }
+    } catch { /* 무시 */ }
+
+    setBgmPickBusy(true);
+    setGenError('');
+    try {
+      if (bgmPick === 'none') {
+        await api.pickBgm(projectId, { none: true });
+      } else {
+        const cand = bgmResp?.candidates.find(c => c.identifier === bgmPick);
+        if (!cand) throw new Error('선택된 후보를 찾을 수 없습니다');
+        await api.pickBgm(projectId, {
+          identifier: cand.identifier,
+          source_url: cand.source_url,
+          title: cand.title,
+        });
+      }
+      await generate();
+    } catch (e: any) {
+      setGenError(e.message || String(e));
+    } finally {
+      setBgmPickBusy(false);
+    }
+  }
+
   async function generate() {
     if (!projectId) return;
     setGenError('');
@@ -234,6 +489,15 @@ export default function App() {
       await api.saveStyleBrief(projectId, payload);
       // extra_notes 와 같이 통합 — 기존 saveStyleNote 는 호환 위해 자유 메모를 전체 전달
       await api.saveStyleNote(projectId, extraNotes.trim());
+      // 오디오 밸런스 + TTS 설정 저장 (Stage 4 가 읽음)
+      await api.saveAudioConfig(projectId, { originalVolume: originalAudio });
+      await api.saveTtsConfig(projectId, {
+        enabled: ttsEnabled,
+        source: ttsSource,
+        genMode: ttsGenMode,
+        voice: ttsVoice,
+        script: ttsScript.trim(),
+      });
       await refreshEstimate(projectId);
       setMainJobId(await api.run(projectId, { mode: 'all', from: 1, to: 4 }));
       setStep('run');
@@ -249,7 +513,13 @@ export default function App() {
     setSuggest(null); setSuggestError(''); setSuggestBusy(false);
     setBrief({ tone: '', purpose: '', topic_keywords: [], must_include_phrases: [], caption_language: '', caption_density: '' });
     setTonePool([]); setPurposePool([]); setExtraNotes('');
+    setOriginalAudio('mute');
+    setTtsEnabled(false); setTtsSource('captions'); setTtsGenMode('auto'); setTtsScript(''); setTtsVoice('Kore');
     setStage0JobId(null); setMainJobId(null); setGenError('');
+    setBgmResp(null); setBgmBusy(false); setBgmError(''); setBgmPick(null); setBgmPickBusy(false);
+    setPreviewFrames([]);
+    setStage0Retry(0); setStage0Retrying(false); setMainRetry(0); setMainRetrying(false);
+    completedNotifiedRef.current = false;
   }
 
   return (
@@ -322,8 +592,12 @@ export default function App() {
           suggest={suggest}
           suggestBusy={suggestBusy}
           suggestError={suggestError}
+          retryCount={stage0Retry}
+          retryMax={MAX_RETRIES}
+          retrying={stage0Retrying}
           onBack={() => setStep('sources')}
           onNext={() => setStep('options')}
+          onReanalyze={reanalyzeReference}
         />
       )}
 
@@ -331,10 +605,13 @@ export default function App() {
       {step === 'options' && (
         <section className="card">
           {suggest && (
-            <Bubble>
-              <span className="bubble-emoji">🐻</span>
-              <span>{suggest.summary}</span>
-            </Bubble>
+            <>
+              <Bubble>
+                <span className="bubble-emoji"><RefFileIcon size={34} /></span>
+                <span>{suggest.summary}</span>
+              </Bubble>
+              <AnalysisDetail points={suggest.analysis} />
+            </>
           )}
           <div className="cardhead"><span className="num">4</span><h2>편집 옵션 <small>(추천이 미리 채워져 있어요 — 자유 수정)</small></h2></div>
 
@@ -404,13 +681,37 @@ export default function App() {
               value={extraNotes} onChange={e => setExtraNotes(e.target.value)} />
           </label>
 
-          {estimate && <p className="hint center">예상 소요 시간 약 <b>{fmtClock(estimate.total14)}</b></p>}
+          <AudioNarrationOptions
+            originalAudio={originalAudio} setOriginalAudio={setOriginalAudio}
+            ttsEnabled={ttsEnabled} setTtsEnabled={setTtsEnabled}
+            ttsSource={ttsSource} setTtsSource={setTtsSource}
+            ttsGenMode={ttsGenMode} setTtsGenMode={setTtsGenMode}
+            ttsScript={ttsScript} setTtsScript={setTtsScript}
+            ttsVoice={ttsVoice} setTtsVoice={setTtsVoice}
+          />
+
+          {estimate && <p className="hint center">예상 소요 시간 <b>{fmtClockRange(estimate.total14)}</b></p>}
           {genError && <div className="err">{genError}</div>}
           <div className="nav">
             <button className="btn" onClick={() => setStep('waiting')}>← 이전</button>
-            <button className="btn primary" disabled={!stage0Done || mainJobId !== null} onClick={generate}>✨ 영상 생성</button>
+            <button className="btn primary" disabled={!stage0Done} onClick={() => setStep('bgm')}>BGM 고르러 가기 →</button>
           </div>
         </section>
+      )}
+
+      {/* ── STEP: BGM 고르기 ── */}
+      {step === 'bgm' && (
+        <BgmPanel
+          resp={bgmResp}
+          busy={bgmBusy}
+          error={bgmError}
+          pick={bgmPick}
+          setPick={setBgmPick}
+          pickBusy={bgmPickBusy}
+          genError={genError}
+          onBack={() => setStep('options')}
+          onConfirm={confirmBgmAndGenerate}
+        />
       )}
 
       {/* ── STEP: 생성/결과 ── */}
@@ -430,6 +731,10 @@ export default function App() {
               estimate={estimate}
               now={now}
               projectId={projectId}
+              frames={previewFrames}
+              retryCount={mainRetry}
+              retryMax={MAX_RETRIES}
+              retrying={mainRetrying}
               onReset={resetAll}
             />
           )}
@@ -472,7 +777,7 @@ function StepIndicator({ step }: { step: Step }) {
 // Waiting 단계 — Stage 0 polling + 실측 진행률 + 완료 시 말풍선
 // ============================================================
 function WaitingPanel({
-  stage0Job, estimate, now, suggest, suggestBusy, suggestError, onBack, onNext,
+  stage0Job, estimate, now, suggest, suggestBusy, suggestError, retryCount, retryMax, retrying, onBack, onNext, onReanalyze,
 }: {
   stage0Job: Job | null;
   estimate: Estimate | null;
@@ -480,11 +785,19 @@ function WaitingPanel({
   suggest: StyleSuggest | null;
   suggestBusy: boolean;
   suggestError: string;
+  retryCount: number;
+  retryMax: number;
+  retrying: boolean;
   onBack: () => void;
   onNext: () => void;
+  onReanalyze: (userFocus: string) => Promise<void> | void;
 }) {
   const failed = stage0Job?.status === 'error';
   const done = stage0Job?.status === 'done';
+  const [reanalyzeOpen, setReanalyzeOpen] = useState(false);
+  const [reanalyzeFocus, setReanalyzeFocus] = useState('');
+  // 재시도 한도 안에서는 사용자에게 "실패" 가 아니라 "재시도 중" 으로 보여준다.
+  const willRetry = failed && retryCount < retryMax;
 
   // Stage 0 만의 진행률 (from=0, to=0). perStage[0] 기준 실측.
   const { pct, eta } = phaseProgress(stage0Job, estimate?.perStage ?? null, 0, 0, now);
@@ -496,7 +809,7 @@ function WaitingPanel({
 
       <div className="prog-hero">
         <Posty size={96} working={!done && !failed} />
-        {failed
+        {failed && !willRetry
           ? <div className="err">분석 실패: {stage0Job?.error}</div>
           : done
             ? <>
@@ -506,20 +819,78 @@ function WaitingPanel({
               </>
             : <>
                 <div className="pct">{pctInt}%</div>
-                <div className="eta">남은 시간 약 {fmtClock(eta)}</div>
+                <div className="eta">{fmtClockRange(eta)}</div>
               </>
         }
       </div>
 
-      {!failed && !done && (
+      {(!failed || willRetry) && !done && (
         <div className="bar"><div className="fill" style={{ width: `${Math.max(3, pctInt)}%` }} /></div>
       )}
 
+      {willRetry && (
+        <p className="hint center retry-hint">
+          ⟳ 일시적 오류라 자동으로 다시 시도하고 있어요 ({retryCount + 1}/{retryMax})
+          {retrying ? ' …' : ''}
+        </p>
+      )}
+
       {done && suggest && (
-        <Bubble>
-          <span className="bubble-emoji">🐻</span>
-          <span>{suggest.summary}</span>
-        </Bubble>
+        <>
+          <Bubble>
+            <span className="bubble-emoji"><RefFileIcon size={34} /></span>
+            <span>{suggest.summary}</span>
+          </Bubble>
+          <AnalysisDetail points={suggest.analysis} />
+        </>
+      )}
+
+      {/* 다시 분석하기 — 완료 상태에서만 노출. 사용자가 결과가 부족하다고
+          느끼면 추가 포커스를 적고 second-pass 분석을 돌릴 수 있다.
+          백엔드는 이전 spec 을 프롬프트에 끼워 "그 이외" 를 채우라고 지시. */}
+      {done && (
+        <div className="reanalyze">
+          {!reanalyzeOpen ? (
+            <button
+              type="button"
+              className="btn ghost reanalyze-toggle"
+              onClick={() => setReanalyzeOpen(true)}
+              disabled={suggestBusy}
+            >🔁 다시 분석하기 <span className="reanalyze-hint">(이전 결과 위에 보강)</span></button>
+          ) : (
+            <div className="reanalyze-form">
+              <label className="reanalyze-label">
+                특히 봐주길 원하는 부분 <small>(선택 · 비워두면 일반 보강)</small>
+              </label>
+              <textarea
+                className="inp"
+                rows={2}
+                placeholder="예: 자막 폰트와 색을 더 자세히 / 점프컷 놓친 거 있는지 / BGM 분위기 다시 확인"
+                value={reanalyzeFocus}
+                onChange={e => setReanalyzeFocus(e.target.value)}
+              />
+              <p className="hint">
+                ⓘ 이전 분석 결과를 프롬프트에 함께 넣어, 같은 답이 아니라 <b>놓쳤거나 부정확했던 부분</b>을 다시 보도록 요청합니다.
+              </p>
+              <div className="reanalyze-actions">
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => { setReanalyzeOpen(false); setReanalyzeFocus(''); }}
+                >취소</button>
+                <button
+                  type="button"
+                  className="btn primary"
+                  onClick={async () => {
+                    setReanalyzeOpen(false);
+                    await onReanalyze(reanalyzeFocus);
+                    setReanalyzeFocus('');
+                  }}
+                >다시 분석 시작 →</button>
+              </div>
+            </div>
+          )}
+        </div>
       )}
 
       <div className="nav">
@@ -530,13 +901,333 @@ function WaitingPanel({
           onClick={onNext}
         >옵션 채우러 가기 →</button>
       </div>
+
+      {/* 디버그 전용 — 정확한 남은 시간 / raw 진행률은 사용자에게 노출하지 않고
+          이 토글을 펼쳤을 때만 보이도록 분리. 평소엔 접혀 있음. */}
+      <TimingDebug
+        eta={eta}
+        pct={pct}
+        now={now}
+        job={stage0Job}
+        done={done}
+        failed={failed}
+        projectId={stage0Job?.projectId ?? null}
+      />
     </section>
+  );
+}
+
+// ============================================================
+// 타이밍 디버그 — "정확한 N분 M초 남음" 처럼 정밀한 진행 정보는
+// 사용자에겐 거슬리므로 토글로 숨겨두고, 디버깅할 때만 펼쳐서 본다.
+// ============================================================
+function TimingDebug({
+  eta, pct, now, job, done, failed, projectId,
+}: {
+  eta: number;
+  pct: number;
+  now: number;
+  job: Job | null;
+  done: boolean;
+  failed: boolean;
+  projectId: string | null;
+}) {
+  const [show, setShow] = useState(false);
+  const startedMs = job?.startedAt ? Date.parse(job.startedAt) : null;
+  const elapsedSec = startedMs ? Math.max(0, (now - startedMs) / 1000) : 0;
+  const state = done ? 'done' : failed ? 'error' : (job?.status ?? 'idle');
+  return (
+    <div className="log-section">
+      <button className="btn ghost log-toggle" onClick={() => setShow(!show)}>
+        {show ? '▾ 타이밍 디버그 숨기기' : '▸ 타이밍 디버그'}
+        <span className="log-count">디버그 전용</span>
+      </button>
+      {show && (
+        <div className="log timing-log">
+          <div className="timing-row">
+            <span className="timing-key">정확한 남은 시간</span>
+            <span className="timing-val">{done ? '0초 (완료)' : fmtClockTicking(eta * 0.75)}</span>
+          </div>
+          <div className="timing-row">
+            <span className="timing-key">Raw ETA</span>
+            <span className="timing-val">{eta.toFixed(2)} s</span>
+          </div>
+          <div className="timing-row">
+            <span className="timing-key">진행률 (raw)</span>
+            <span className="timing-val">{(pct * 100).toFixed(2)}%</span>
+          </div>
+          <div className="timing-row">
+            <span className="timing-key">경과 시간</span>
+            <span className="timing-val">{elapsedSec.toFixed(1)} s</span>
+          </div>
+          <div className="timing-row">
+            <span className="timing-key">Job 상태</span>
+            <span className="timing-val">{state}</span>
+          </div>
+          {job?.id && (
+            <div className="timing-row">
+              <span className="timing-key">Job ID</span>
+              <span className="timing-val mono">{job.id}</span>
+            </div>
+          )}
+          {job?.startedAt && (
+            <div className="timing-row">
+              <span className="timing-key">시작 시각</span>
+              <span className="timing-val mono">{job.startedAt}</span>
+            </div>
+          )}
+          <EditSpecDebug projectId={projectId} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// 레퍼런스 분석 결과(edit-spec.json) 디버그 뷰어 — 타이밍 디버그 안에서만 노출.
+// 펼칠 때 1회 fetch. 전체 JSON 을 보기 좋게 출력 (디버깅 전용).
+// ============================================================
+function EditSpecDebug({ projectId }: { projectId: string | null }) {
+  const [open, setOpen] = useState(false);
+  const [spec, setSpec] = useState<any | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const load = async () => {
+    if (!projectId) { setError('projectId 없음'); return; }
+    setLoading(true); setError('');
+    try {
+      setSpec(await api.getEditSpec(projectId));
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && spec === null && !loading) load();
+  };
+
+  return (
+    <div className="spec-debug">
+      <button type="button" className="spec-debug-toggle" onClick={toggle}>
+        {open ? '▾' : '▸'} 레퍼런스 분석 결과 (edit-spec.json)
+        <span className="spec-debug-refresh" onClick={(e) => { e.stopPropagation(); load(); }}>
+          {loading ? '⟳' : '↻'}
+        </span>
+      </button>
+      {open && (
+        <div className="spec-debug-body">
+          {error && <div className="err">{error}</div>}
+          {!error && loading && <div className="log-empty">불러오는 중…</div>}
+          {!error && !loading && spec === null && <div className="log-empty">아직 분석 결과가 없어요.</div>}
+          {!error && !loading && spec && (
+            <pre className="log-extra">{safeJson(spec)}</pre>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
 // 마스코트 말풍선
 function Bubble({ children }: { children: React.ReactNode }) {
   return <div className="bubble">{children}</div>;
+}
+
+// ============================================================
+// 오디오 / 나레이션 옵션 — 옵션 단계에 들어가는 한 묶음.
+//   1) 원본 영상 소리: 기본은 음원(BGM)만, 원하면 원본 소리를 작게/크게.
+//   2) AI 음성 나레이션(TTS): 끄기 / 자막 읽기 / 새로 생성(자동·수동).
+// ============================================================
+function AudioNarrationOptions({
+  originalAudio, setOriginalAudio,
+  ttsEnabled, setTtsEnabled,
+  ttsSource, setTtsSource,
+  ttsGenMode, setTtsGenMode,
+  ttsScript, setTtsScript,
+  ttsVoice, setTtsVoice,
+}: {
+  originalAudio: OriginalVolume;
+  setOriginalAudio: (v: OriginalVolume) => void;
+  ttsEnabled: boolean;
+  setTtsEnabled: (v: boolean) => void;
+  ttsSource: TtsSource;
+  setTtsSource: (v: TtsSource) => void;
+  ttsGenMode: TtsGenMode;
+  setTtsGenMode: (v: TtsGenMode) => void;
+  ttsScript: string;
+  setTtsScript: (v: string) => void;
+  ttsVoice: string;
+  setTtsVoice: (v: string) => void;
+}) {
+  return (
+    <div className="audio-opts">
+      {/* 원본 영상 소리 */}
+      <div className="opt-block">
+        <div className="opt-head">
+          <span className="opt-title">🔊 원본 영상 소리</span>
+          <span className="opt-sub">기본은 음원(BGM)만 나와요</span>
+        </div>
+        <div className="seg">
+          {([
+            ['mute', '음원만', '원본 소리 끔'],
+            ['low', '작게 넣기', '음원 위주 + 현장음 살짝'],
+            ['full', '크게 넣기', '현장음 + 음원은 아래로'],
+          ] as [OriginalVolume, string, string][]).map(([val, label, desc]) => (
+            <button
+              type="button"
+              key={val}
+              className={'seg-btn' + (originalAudio === val ? ' on' : '')}
+              onClick={() => setOriginalAudio(val)}
+              title={desc}
+            >{label}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* AI 음성 나레이션 */}
+      <div className="opt-block">
+        <div className="opt-head">
+          <span className="opt-title">🎙 AI 음성 나레이션</span>
+          <label className="switch">
+            <input type="checkbox" checked={ttsEnabled} onChange={e => setTtsEnabled(e.target.checked)} />
+            <span className="switch-track"><span className="switch-thumb" /></span>
+            <span className="switch-label">{ttsEnabled ? '켜짐' : '꺼짐'}</span>
+          </label>
+        </div>
+
+        {ttsEnabled && (
+          <div className="opt-nested">
+            {/* 내용 선택: 자막 읽기 vs 새로 생성 */}
+            <div className="seg">
+              {([
+                ['captions', '자막 읽기', '화면 자막을 그대로 음성으로'],
+                ['generate', '새로 생성', '나레이션을 새로 만들기'],
+              ] as [TtsSource, string, string][]).map(([val, label, desc]) => (
+                <button
+                  type="button"
+                  key={val}
+                  className={'seg-btn' + (ttsSource === val ? ' on' : '')}
+                  onClick={() => setTtsSource(val)}
+                  title={desc}
+                >{label}</button>
+              ))}
+            </div>
+
+            {/* 새로 생성이면: 자동 vs 수동 */}
+            {ttsSource === 'generate' && (
+              <>
+                <div className="seg">
+                  {([
+                    ['auto', '자동 생성', 'AI 가 영상 보고 작성'],
+                    ['manual', '수동 작업', '내가 직접 대본 작성'],
+                  ] as [TtsGenMode, string, string][]).map(([val, label, desc]) => (
+                    <button
+                      type="button"
+                      key={val}
+                      className={'seg-btn' + (ttsGenMode === val ? ' on' : '')}
+                      onClick={() => setTtsGenMode(val)}
+                      title={desc}
+                    >{label}</button>
+                  ))}
+                </div>
+                {ttsGenMode === 'manual' && (
+                  <label className="full opt-script">나레이션 대본
+                    <textarea
+                      className="inp"
+                      rows={3}
+                      placeholder="음성으로 읽어줄 내용을 적어주세요. 문장 단위로 컷에 나눠 배치돼요."
+                      value={ttsScript}
+                      onChange={e => setTtsScript(e.target.value)}
+                    />
+                  </label>
+                )}
+              </>
+            )}
+
+            {/* 목소리 선택 */}
+            <label className="opt-voice">목소리
+              <select className="inp" value={ttsVoice} onChange={e => setTtsVoice(e.target.value)}>
+                {TTS_VOICES.map(v => <option key={v} value={v}>{v}</option>)}
+              </select>
+            </label>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// 레퍼런스 분석 항목별 상세 — 말풍선 아래에 접이식으로 표시.
+// summary(한 줄) 보다 자세히, 무드/리듬/색감/자막/오디오/소재 등을 풀어 보여준다.
+// ============================================================
+function AnalysisDetail({ points }: { points?: { label: string; detail: string }[] }) {
+  const [open, setOpen] = useState(true);
+  if (!points || points.length === 0) return null;
+  return (
+    <div className="analysis">
+      <button type="button" className="analysis-toggle" onClick={() => setOpen(!open)}>
+        {open ? '▾' : '▸'} 분석 내용 자세히 보기
+        <span className="analysis-count">{points.length}</span>
+      </button>
+      {open && (
+        <ul className="analysis-list">
+          {points.map((p, i) => (
+            <li key={i} className="analysis-item">
+              <span className="analysis-label">{p.label}</span>
+              <span className="analysis-text">{p.detail}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// 레퍼런스 파일 아이콘 — Posty 스프라이트(이미지 4) 안의 "이미지/파일
+// placeholder" 아이콘 스타일을 인라인 SVG 로 재현. 점선 라운드 프레임 +
+// 산 실루엣 + 작은 해. 분석 완료 말풍선 좌측에 들어가 "분석한 레퍼런스
+// 영상" 을 시각적으로 상기시킨다.
+// ============================================================
+function RefFileIcon({ size = 34 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 36 36"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      role="img"
+      aria-label="레퍼런스 파일"
+    >
+      {/* 점선 라운드 프레임 */}
+      <rect
+        x="3.2" y="7" width="29.6" height="22" rx="4"
+        stroke="rgba(185,169,240,0.7)"
+        strokeWidth="1.4"
+        strokeDasharray="3.2 2.4"
+        fill="rgba(185,169,240,0.10)"
+      />
+      {/* 해 */}
+      <circle cx="11.5" cy="14" r="2.3" fill="#f2a9c4" opacity="0.92" />
+      {/* 산 두 개 — 뒤쪽 큰 산 */}
+      <path
+        d="M5.5 26.5 L13.5 16.5 L21 24 L21 26.5 Z"
+        fill="rgba(185,169,240,0.55)"
+      />
+      {/* 산 — 앞쪽 작은 산 */}
+      <path
+        d="M16 26.5 L23 19.5 L30.5 26.5 Z"
+        fill="rgba(158,230,192,0.6)"
+      />
+    </svg>
+  );
 }
 
 // ============================================================
@@ -718,7 +1409,9 @@ function SourceDropzone({ busy, onFiles }: { busy: boolean; onFiles: (files: Fil
           e.target.value = '';
         }}
       />
-      <div className="dz-icon">{busy ? '⏳' : '📁'}</div>
+      <div className="dz-icon">
+        <Posty size={72} variant="logo" working={busy} />
+      </div>
       <div className="dz-title">
         {busy ? '업로드 중…' : dragging ? '여기로 놓아주세요' : '영상 파일을 드래그하거나 클릭'}
       </div>
@@ -729,29 +1422,44 @@ function SourceDropzone({ busy, onFiles }: { busy: boolean; onFiles: (files: Fil
 
 // 생성 진행 — 로그는 기본 숨김, "로그 확인" 버튼으로 토글
 function ProgressPanel({
-  job, estimate, now, projectId, onReset,
+  job, estimate, now, projectId, frames, retryCount, retryMax, retrying, onReset,
 }: {
   job: Job | null;
   estimate: Estimate | null;
   now: number;
   projectId: string | null;
+  frames: PreviewFrame[];
+  retryCount: number;
+  retryMax: number;
+  retrying: boolean;
   onReset: () => void;
 }) {
   const failed = job?.status === 'error';
+  const willRetry = failed && retryCount < retryMax;
+  const showError = failed && !willRetry;
   const { pct, eta, currentStage } = phaseProgress(job, estimate?.perStage ?? null, 1, 4, now);
   const pctInt = Math.round(pct * 100);
   return (
     <section className="card progress">
-      <div className="prog-hero">
-        <Posty size={96} working={!failed} />
-        {failed ? <div className="err">{job?.error}</div> : (
-          <>
-            <div className="pct">{pctInt}%</div>
-            <div className="eta">남은 시간 약 {fmtClock(eta)}</div>
-          </>
+      <div className="prog-split">
+        <div className="prog-left">
+          <Posty size={96} working={!showError} />
+          {showError ? <div className="err">{job?.error}</div> : (
+            <>
+              <div className="pct">{pctInt}%</div>
+              <div className="eta">{fmtClockRange(eta)}</div>
+              <div className="eta-tick">{fmtClockTicking(eta * 0.75)}</div>
+            </>
+          )}
+        </div>
+        {!showError && frames.length > 0 && (
+          <div className="prog-right">
+            <FrameCarousel frames={frames} />
+            <div className="carousel-tag">이런 장면들 위주로 작업하고 있어요</div>
+          </div>
         )}
       </div>
-      {!failed && (
+      {!showError && (
         <>
           <div className="bar"><div className="fill" style={{ width: `${Math.max(3, pctInt)}%` }} /></div>
           <ol className="steps">
@@ -761,12 +1469,208 @@ function ProgressPanel({
               return <li key={stage} className={state}>{state === 'ok' ? '✓' : state === 'cur' ? '◴' : '○'} {name}</li>;
             })}
           </ol>
+          {willRetry && (
+            <p className="hint center retry-hint">
+              ⟳ 일시적 오류라 자동으로 다시 시도하고 있어요 ({retryCount + 1}/{retryMax})
+              {retrying ? ' …' : ''}
+            </p>
+          )}
+          <p className="hint center close-tab-hint">
+            이 탭을 닫아두셔도 괜찮아요. 완료되면 알려드릴게요.
+          </p>
         </>
       )}
-      <DebugLog job={job} projectId={projectId} active={!failed} />
-      {failed && <div className="row"><button className="btn" onClick={onReset}>처음으로</button></div>}
+      <DebugLog job={job} projectId={projectId} active={!showError} />
+      {showError && <div className="row"><button className="btn" onClick={onReset}>처음으로</button></div>}
     </section>
   );
+}
+
+// ============================================================
+// 진행 화면 캐러셀 — 프레임 자동 회전 + 마우스 호버 시 일시정지
+// ============================================================
+function FrameCarousel({ frames }: { frames: PreviewFrame[] }) {
+  const [idx, setIdx] = useState(0);
+  const [hover, setHover] = useState(false);
+  useEffect(() => {
+    if (hover || frames.length <= 1) return;
+    const t = setInterval(() => setIdx(i => (i + 1) % frames.length), 1600);
+    return () => clearInterval(t);
+  }, [hover, frames.length]);
+
+  // 3 장이 동시에 보이는 휠 — 가운데가 활성, 좌우는 흐릿하게
+  // (offset 이 음수일 수 있어 두 번 나눠야 안전한 모듈러)
+  const at = (offset: number) => {
+    const n = frames.length;
+    return frames[((idx + offset) % n + n) % n];
+  };
+  return (
+    <div
+      className="carousel"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      <div className="carousel-wheel">
+        <img className="carousel-slot side" src={at(-1).url} alt="" />
+        <img className="carousel-slot center" key={at(0).url} src={at(0).url} alt="" />
+        <img className="carousel-slot side" src={at(1).url} alt="" />
+      </div>
+      <div className="carousel-dots">
+        {frames.map((_, i) => (
+          <span key={i} className={'carousel-dot ' + (i === idx ? 'on' : '')} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// BGM 고르기 — 레퍼런스 실제 BGM 정보 + 무료 추천 트랙 후보 + 미리듣기 + 선택
+// ============================================================
+function BgmPanel({
+  resp, busy, error, pick, setPick, pickBusy, genError, onBack, onConfirm,
+}: {
+  resp: BgmCandidatesResp | null;
+  busy: boolean;
+  error: string;
+  pick: 'none' | string | null;
+  setPick: (v: 'none' | string) => void;
+  pickBusy: boolean;
+  genError: string;
+  onBack: () => void;
+  onConfirm: () => void;
+}) {
+  // 미리듣기 — 한 번에 하나만 재생되도록 ref 공유
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playingId, setPlayingId] = useState<string | null>(null);
+
+  const play = (cand: BgmCandidate) => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    if (playingId === cand.identifier) {
+      setPlayingId(null);
+      return;
+    }
+    const a = new Audio(cand.source_url);
+    a.volume = 0.7;
+    a.onended = () => setPlayingId(null);
+    a.onerror = () => setPlayingId(null);
+    audioRef.current = a;
+    a.play().catch(() => setPlayingId(null));
+    setPlayingId(cand.identifier);
+  };
+
+  useEffect(() => () => { audioRef.current?.pause(); }, []);
+
+  const ref = resp?.referenceBgm;
+  const refKnown = ref && ref.status === 'matched';
+
+  return (
+    <section className="card">
+      <div className="cardhead"><span className="num">5</span><h2>BGM 고르기</h2></div>
+      <p className="hint">
+        레퍼런스의 분위기에 어울리는 무료 음원을 골라 드릴게요. 들어보고 마음에 드는 트랙을 고르거나, BGM 없이 진행할 수도 있어요.
+      </p>
+
+      {ref && (ref.status === 'matched' || ref.status === 'no_match') && (
+        <div className="ref-bgm">
+          <div className="ref-bgm-head">🎵 레퍼런스 영상의 음원</div>
+          {refKnown ? (
+            <div className="ref-bgm-body">
+              <div className="ref-bgm-title">{ref.title}{ref.artist ? ` — ${ref.artist}` : ''}</div>
+              {ref.album && <div className="ref-bgm-sub">{ref.album}{ref.release_date ? ` · ${ref.release_date.slice(0, 4)}` : ''}</div>}
+              {ref.genres && ref.genres.length > 0 && (
+                <div className="ref-bgm-chips">
+                  {ref.genres.slice(0, 4).map(g => <span className="chip" key={g}>{g}</span>)}
+                </div>
+              )}
+              <div className="ref-bgm-links">
+                {ref.spotify_url && <a href={ref.spotify_url} target="_blank" rel="noreferrer" className="ref-bgm-link">Spotify ↗</a>}
+                {ref.apple_url && <a href={ref.apple_url} target="_blank" rel="noreferrer" className="ref-bgm-link">Apple Music ↗</a>}
+                {ref.song_link && <a href={ref.song_link} target="_blank" rel="noreferrer" className="ref-bgm-link">기타 링크 ↗</a>}
+              </div>
+              <div className="ref-bgm-note">상용곡이라 그대로 쓸 수는 없어서, 비슷한 분위기의 무료 음원을 골라뒀어요.</div>
+            </div>
+          ) : (
+            <div className="ref-bgm-sub">레퍼런스의 BGM 을 정확히 식별하지 못했어요. 대신 분위기로 추천한 무료 음원에서 골라보세요.</div>
+          )}
+        </div>
+      )}
+
+      {busy && <div className="bgm-loading">🎶 추천 음원을 가져오는 중…</div>}
+      {error && <div className="err">{error}</div>}
+
+      {resp && (
+        <>
+          <div className="bgm-list">
+            {resp.candidates.map((c, i) => {
+              const checked = pick === c.identifier;
+              const playing = playingId === c.identifier;
+              return (
+                <div key={c.identifier} className={'bgm-item' + (checked ? ' on' : '')}>
+                  <label className="bgm-item-pick">
+                    <input
+                      type="radio"
+                      name="bgm-pick"
+                      checked={checked}
+                      onChange={() => setPick(c.identifier)}
+                    />
+                    <span className="bgm-radio" />
+                  </label>
+                  <button
+                    type="button"
+                    className={'bgm-play' + (playing ? ' on' : '')}
+                    onClick={() => play(c)}
+                    aria-label={playing ? '일시정지' : '미리듣기'}
+                  >{playing ? '⏸' : '▶'}</button>
+                  <div className="bgm-meta">
+                    <div className="bgm-title">{c.title || `Track ${i + 1}`}</div>
+                    <div className="bgm-sub">
+                      {fmtDur(c.duration_sec)} · Internet Archive
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            <div className={'bgm-item bgm-none' + (pick === 'none' ? ' on' : '')}>
+              <label className="bgm-item-pick">
+                <input
+                  type="radio"
+                  name="bgm-pick"
+                  checked={pick === 'none'}
+                  onChange={() => setPick('none')}
+                />
+                <span className="bgm-radio" />
+              </label>
+              <div className="bgm-meta">
+                <div className="bgm-title">BGM 없이 진행</div>
+                <div className="bgm-sub">원본 영상 사운드만 사용</div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {genError && <div className="err">{genError}</div>}
+      <div className="nav">
+        <button className="btn" onClick={onBack} disabled={pickBusy}>← 이전</button>
+        <button
+          className="btn primary"
+          disabled={busy || pickBusy || !pick}
+          onClick={onConfirm}
+        >{pickBusy ? '준비 중…' : '✨ 이 음원으로 생성'}</button>
+      </div>
+    </section>
+  );
+}
+
+function fmtDur(sec: number): string {
+  if (!isFinite(sec) || sec <= 0) return '';
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec - m * 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
 }
 
 function ResultPanel({
