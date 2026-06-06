@@ -4,14 +4,19 @@ import { Posty } from './Posty';
 
 const STAGE_NAMES = ['레퍼런스 분석', '컷편집', '색보정', '자막', '음성·BGM'];
 
-type Step = 'ref' | 'sources' | 'waiting' | 'options' | 'bgm' | 'run';
+// 흐름: 레퍼런스 → 소스 → 분석 → 옵션 → 편집(컷+자막) → BGM 입히기 → 완성
+//   'edit'  = stages 1~3 (컷편집/색보정/자막) 진행. 끝나면 결과를 미리 보여줌.
+//   'bgm'   = 편집 결과를 보면서 BGM 을 골라 입혀봄.
+//   'final' = stage 4 (BGM/음성) 적용 → 최종 결과.
+type Step = 'ref' | 'sources' | 'waiting' | 'options' | 'edit' | 'bgm' | 'final';
 const STEPS: { key: Step; label: string }[] = [
   { key: 'ref',      label: '레퍼런스' },
   { key: 'sources',  label: '소스' },
-  { key: 'waiting',  label: '분석 대기' },
+  { key: 'waiting',  label: '분석' },
   { key: 'options',  label: '옵션' },
-  { key: 'bgm',      label: 'BGM 고르기' },
-  { key: 'run',      label: '생성' },
+  { key: 'edit',     label: '편집' },
+  { key: 'bgm',      label: 'BGM' },
+  { key: 'final',    label: '완성' },
 ];
 
 // 영상 확장자(드롭 시 필터링용)
@@ -174,6 +179,10 @@ export default function App() {
   const [stage0JobId, setStage0JobId] = useState<string | null>(null);
   const [mainJobId, setMainJobId] = useState<string | null>(null);
   const [genError, setGenError] = useState('');
+  // 생성 단계 구분: 'edit'(stages 1~3) → 'final'(stage 4). mainJob 을 두 잡에 재사용.
+  const [genPhase, setGenPhase] = useState<'edit' | 'final'>('edit');
+  // 편집(컷+자막) 결과 영상 URL — BGM 단계에서 미리보기로 보여줌.
+  const [captionedUrl, setCaptionedUrl] = useState<string | null>(null);
 
   // BGM 선택 상태
   const [bgmResp, setBgmResp] = useState<BgmCandidatesResp | null>(null);
@@ -203,7 +212,8 @@ export default function App() {
   const mainRunning = !!mainJob && mainJob.status !== 'done' && mainJob.status !== 'error';
   const now = useNow(stage0Running || mainRunning);
 
-  const finalPath: string | null = mainJob?.status === 'done' ? (mainJob.result?.final ?? null) : null;
+  // 최종 영상은 'final' 단계의 mainJob 이 끝났을 때만.
+  const finalPath: string | null = (genPhase === 'final' && mainJob?.status === 'done') ? (mainJob.result?.final ?? null) : null;
 
   useEffect(() => { api.health().then(setOnline); }, []);
 
@@ -233,8 +243,9 @@ export default function App() {
   }, [step, projectId, stage0Done]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 진행 화면 진입 시 프레임 캐러셀 fetch
+  // 캐러셀 프레임 — 옵션 단계에서 미리 추출·캐시해 둔다 (#2). 편집/완성 진행 화면에서 바로 사용.
   useEffect(() => {
-    if (step !== 'run' || !projectId) return;
+    if (step !== 'options' || !projectId) return;
     if (previewFrames.length > 0) return;
     let cancelled = false;
     (async () => {
@@ -245,6 +256,23 @@ export default function App() {
     })();
     return () => { cancelled = true; };
   }, [step, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 편집(stages 1~3) 완료 → BGM 단계로. 완료된 captioned.mp4 URL 도 가져온다.
+  useEffect(() => {
+    if (step !== 'edit') return;
+    if (genPhase !== 'edit') return;
+    if (mainJob?.status !== 'done') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const proj = await api.getProject(projectId!);
+        const rel = proj?.paths?.captionedMp4;
+        if (!cancelled && rel) setCaptionedUrl(api.fileUrl(rel));
+      } catch { /* 미리보기 없어도 진행 */ }
+      if (!cancelled) setStep('bgm');
+    })();
+    return () => { cancelled = true; };
+  }, [step, genPhase, mainJob?.status, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 자동 재시도: Stage 0 ──────────────────────────────────────
   // job.status='error' 가 되면 backoff 후 같은 stage 를 다시 큐잉.
@@ -271,26 +299,33 @@ export default function App() {
     return () => { clearTimeout(timer); setStage0Retrying(false); };
   }, [stage0Job?.status, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── 자동 재시도: 메인 job (Stage 1~4) ─────────────────────────
-  // error 면 progress 에서 마지막으로 완료된 stage 를 찾아 그 다음부터 재실행.
-  // 완료된 stage 의 산출물(cut.mp4 등)은 그대로 남아 있어서 다음 stage 가 이어 진행 가능.
+  // ── 자동 재시도: 메인 job ──────────────────────────────────────
+  // 'edit' 단계(stages 1~3): 마지막 완료 stage 다음부터 ~3 까지 재실행.
+  // 'final' 단계(stage 4): stage 4 만 재실행.
+  // 완료된 stage 산출물(cut.mp4 등)은 남아 있어 이어서 진행 가능.
   useEffect(() => {
     if (!projectId) return;
     if (mainJob?.status !== 'error') return;
     if (mainRetry >= MAX_RETRIES) return;
     if (mainRetrying) return;
-    let lastDone = 0;
-    for (const p of mainJob.progress || []) {
-      if (p.step.endsWith('_done') && typeof p.extra?.stage === 'number') {
-        lastDone = Math.max(lastDone, p.extra.stage);
+    const toStage = genPhase === 'edit' ? 3 : 4;
+    let restartFrom: number;
+    if (genPhase === 'final') {
+      restartFrom = 4;
+    } else {
+      let lastDone = 0;
+      for (const p of mainJob.progress || []) {
+        if (p.step.endsWith('_done') && typeof p.extra?.stage === 'number') {
+          lastDone = Math.max(lastDone, p.extra.stage);
+        }
       }
+      restartFrom = Math.max(1, lastDone + 1);
     }
-    const restartFrom = Math.max(1, lastDone + 1);
     const delay = Math.min(8000, 1500 * Math.pow(2, mainRetry));
     setMainRetrying(true);
     const timer = setTimeout(async () => {
       try {
-        const newId = await api.run(projectId, { mode: 'all', from: restartFrom, to: 4 });
+        const newId = await api.run(projectId, { mode: 'all', from: restartFrom, to: toStage });
         setMainRetry(r => r + 1);
         setMainJobId(newId);
       } catch {
@@ -323,8 +358,9 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [stage0Job?.id, stage0Job?.status, projectId, estimate]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 완료 시 브라우저 알림 (사용자가 탭을 닫아도 알 수 있게)
+  // 완료 시 브라우저 알림 (최종 영상 완성 시에만)
   useEffect(() => {
+    if (genPhase !== 'final') return;
     if (!mainJob || mainJob.status !== 'done') return;
     if (completedNotifiedRef.current) return;
     completedNotifiedRef.current = true;
@@ -439,12 +475,49 @@ export default function App() {
     }
   }
 
-  // BGM 패널의 "이 음원으로 생성" 버튼이 호출하는 함수.
-  // (1) Notification 권한은 await 이전에 요청해야 일부 브라우저(Safari)에서 user-gesture 가
-  //     끊기지 않는다. (2) 다운로드 → 생성 시작.
-  async function confirmBgmAndGenerate() {
+  // 옵션 단계 "편집 시작" — 설정 저장 후 컷편집~자막(stages 1~3) 잡 실행.
+  // BGM/음성(stage 4)은 편집 결과를 본 뒤 'final' 단계에서 따로 돌린다.
+  async function startEditing() {
+    if (!projectId) return;
+    setGenError('');
+    try {
+      const payload: StyleBrief = {
+        caption_language: brief.caption_language,
+        caption_density: brief.caption_density,
+        tone: brief.tone.trim(),
+        purpose: brief.purpose.trim(),
+        topic_keywords: brief.topic_keywords.slice(0, 20),
+        must_include_phrases: brief.must_include_phrases.slice(0, 10),
+        extra_notes: extraNotes.trim(),
+      };
+      await api.saveStyleBrief(projectId, payload);
+      await api.saveStyleNote(projectId, extraNotes.trim());
+      // 오디오 밸런스 + TTS 설정도 미리 저장 (stage 4 가 나중에 읽음)
+      await api.saveAudioConfig(projectId, { originalVolume: originalAudio });
+      await api.saveTtsConfig(projectId, {
+        enabled: ttsEnabled,
+        source: ttsSource,
+        genMode: ttsGenMode,
+        voice: ttsVoice,
+        script: ttsScript.trim(),
+      });
+      await refreshEstimate(projectId);
+      const jobId = await api.run(projectId, { mode: 'all', from: 1, to: 3 });
+      setGenPhase('edit');
+      setMainRetry(0); setMainRetrying(false);
+      setCaptionedUrl(null);
+      completedNotifiedRef.current = false;
+      setMainJobId(jobId);
+      setStep('edit');
+    } catch (e: any) {
+      setGenError(e.message || String(e));
+    }
+  }
+
+  // BGM 단계 "이 음원으로 완성" — 선택 음원 다운로드 후 stage 4 잡 실행.
+  // (Notification 권한은 await 이전에 요청해야 user-gesture 가 안 끊긴다.)
+  async function finalizeWithBgm() {
     if (!projectId || !bgmPick) return;
-    // (1) — user-gesture 컨텍스트가 살아 있을 때 즉시 요청
     try {
       if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
         Notification.requestPermission().catch(() => {});
@@ -465,44 +538,16 @@ export default function App() {
           title: cand.title,
         });
       }
-      await generate();
+      const jobId = await api.run(projectId, { mode: 'all', from: 4, to: 4 });
+      setGenPhase('final');
+      setMainRetry(0); setMainRetrying(false);
+      completedNotifiedRef.current = false;
+      setMainJobId(jobId);
+      setStep('final');
     } catch (e: any) {
       setGenError(e.message || String(e));
     } finally {
       setBgmPickBusy(false);
-    }
-  }
-
-  async function generate() {
-    if (!projectId) return;
-    setGenError('');
-    try {
-      const payload: StyleBrief = {
-        caption_language: brief.caption_language,
-        caption_density: brief.caption_density,
-        tone: brief.tone.trim(),
-        purpose: brief.purpose.trim(),
-        topic_keywords: brief.topic_keywords.slice(0, 20),
-        must_include_phrases: brief.must_include_phrases.slice(0, 10),
-        extra_notes: extraNotes.trim(),
-      };
-      await api.saveStyleBrief(projectId, payload);
-      // extra_notes 와 같이 통합 — 기존 saveStyleNote 는 호환 위해 자유 메모를 전체 전달
-      await api.saveStyleNote(projectId, extraNotes.trim());
-      // 오디오 밸런스 + TTS 설정 저장 (Stage 4 가 읽음)
-      await api.saveAudioConfig(projectId, { originalVolume: originalAudio });
-      await api.saveTtsConfig(projectId, {
-        enabled: ttsEnabled,
-        source: ttsSource,
-        genMode: ttsGenMode,
-        voice: ttsVoice,
-        script: ttsScript.trim(),
-      });
-      await refreshEstimate(projectId);
-      setMainJobId(await api.run(projectId, { mode: 'all', from: 1, to: 4 }));
-      setStep('run');
-    } catch (e: any) {
-      setGenError(e.message || String(e));
     }
   }
 
@@ -516,6 +561,7 @@ export default function App() {
     setOriginalAudio('mute');
     setTtsEnabled(false); setTtsSource('captions'); setTtsGenMode('auto'); setTtsScript(''); setTtsVoice('Kore');
     setStage0JobId(null); setMainJobId(null); setGenError('');
+    setGenPhase('edit'); setCaptionedUrl(null);
     setBgmResp(null); setBgmBusy(false); setBgmError(''); setBgmPick(null); setBgmPickBusy(false);
     setPreviewFrames([]);
     setStage0Retry(0); setStage0Retrying(false); setMainRetry(0); setMainRetrying(false);
@@ -694,12 +740,30 @@ export default function App() {
           {genError && <div className="err">{genError}</div>}
           <div className="nav">
             <button className="btn" onClick={() => setStep('waiting')}>← 이전</button>
-            <button className="btn primary" disabled={!stage0Done} onClick={() => setStep('bgm')}>BGM 고르러 가기 →</button>
+            <button className="btn primary" disabled={!stage0Done} onClick={startEditing}>편집 시작 (컷+자막) →</button>
           </div>
         </section>
       )}
 
-      {/* ── STEP: BGM 고르기 ── */}
+      {/* ── STEP: 편집 (컷+색보정+자막, stages 1~3) ── */}
+      {step === 'edit' && (
+        <ProgressPanel
+          job={mainJob}
+          estimate={estimate}
+          now={now}
+          projectId={projectId}
+          frames={previewFrames}
+          fromStage={1}
+          toStage={3}
+          phaseLabel="컷편집 + 자막"
+          retryCount={mainRetry}
+          retryMax={MAX_RETRIES}
+          retrying={mainRetrying}
+          onReset={resetAll}
+        />
+      )}
+
+      {/* ── STEP: BGM 입히기 (편집 결과 미리보기 + 음원 선택) ── */}
       {step === 'bgm' && (
         <BgmPanel
           resp={bgmResp}
@@ -709,13 +773,14 @@ export default function App() {
           setPick={setBgmPick}
           pickBusy={bgmPickBusy}
           genError={genError}
+          captionedUrl={captionedUrl}
           onBack={() => setStep('options')}
-          onConfirm={confirmBgmAndGenerate}
+          onConfirm={finalizeWithBgm}
         />
       )}
 
-      {/* ── STEP: 생성/결과 ── */}
-      {step === 'run' && (
+      {/* ── STEP: 완성 (BGM/음성 입히기, stage 4) ── */}
+      {step === 'final' && (
         <>
           {finalPath ? (
             <ResultPanel
@@ -732,6 +797,9 @@ export default function App() {
               now={now}
               projectId={projectId}
               frames={previewFrames}
+              fromStage={4}
+              toStage={4}
+              phaseLabel="BGM·음성 입히기"
               retryCount={mainRetry}
               retryMax={MAX_RETRIES}
               retrying={mainRetrying}
@@ -1422,13 +1490,16 @@ function SourceDropzone({ busy, onFiles }: { busy: boolean; onFiles: (files: Fil
 
 // 생성 진행 — 로그는 기본 숨김, "로그 확인" 버튼으로 토글
 function ProgressPanel({
-  job, estimate, now, projectId, frames, retryCount, retryMax, retrying, onReset,
+  job, estimate, now, projectId, frames, fromStage, toStage, phaseLabel, retryCount, retryMax, retrying, onReset,
 }: {
   job: Job | null;
   estimate: Estimate | null;
   now: number;
   projectId: string | null;
   frames: PreviewFrame[];
+  fromStage: number;
+  toStage: number;
+  phaseLabel?: string;
   retryCount: number;
   retryMax: number;
   retrying: boolean;
@@ -1437,8 +1508,11 @@ function ProgressPanel({
   const failed = job?.status === 'error';
   const willRetry = failed && retryCount < retryMax;
   const showError = failed && !willRetry;
-  const { pct, eta, currentStage } = phaseProgress(job, estimate?.perStage ?? null, 1, 4, now);
+  const { pct, eta, currentStage } = phaseProgress(job, estimate?.perStage ?? null, fromStage, toStage, now);
   const pctInt = Math.round(pct * 100);
+  // 이 단계에 해당하는 stage 들 (fromStage..toStage)
+  const phaseStages: number[] = [];
+  for (let s = fromStage; s <= toStage; s++) phaseStages.push(s);
   return (
     <section className="card progress">
       <div className="prog-split">
@@ -1461,10 +1535,11 @@ function ProgressPanel({
       </div>
       {!showError && (
         <>
+          {phaseLabel && <div className="phase-label">{phaseLabel}</div>}
           <div className="bar"><div className="fill" style={{ width: `${Math.max(3, pctInt)}%` }} /></div>
           <ol className="steps">
-            {STAGE_NAMES.slice(1).map((name, i) => {
-              const stage = i + 1;
+            {phaseStages.map((stage) => {
+              const name = STAGE_NAMES[stage];
               const state = stage < currentStage ? 'ok' : stage === currentStage ? 'cur' : 'todo';
               return <li key={stage} className={state}>{state === 'ok' ? '✓' : state === 'cur' ? '◴' : '○'} {name}</li>;
             })}
@@ -1528,7 +1603,7 @@ function FrameCarousel({ frames }: { frames: PreviewFrame[] }) {
 // BGM 고르기 — 레퍼런스 실제 BGM 정보 + 무료 추천 트랙 후보 + 미리듣기 + 선택
 // ============================================================
 function BgmPanel({
-  resp, busy, error, pick, setPick, pickBusy, genError, onBack, onConfirm,
+  resp, busy, error, pick, setPick, pickBusy, genError, captionedUrl, onBack, onConfirm,
 }: {
   resp: BgmCandidatesResp | null;
   busy: boolean;
@@ -1537,6 +1612,7 @@ function BgmPanel({
   setPick: (v: 'none' | string) => void;
   pickBusy: boolean;
   genError: string;
+  captionedUrl: string | null;
   onBack: () => void;
   onConfirm: () => void;
 }) {
@@ -1569,10 +1645,17 @@ function BgmPanel({
 
   return (
     <section className="card">
-      <div className="cardhead"><span className="num">5</span><h2>BGM 고르기</h2></div>
+      <div className="cardhead"><span className="num">6</span><h2>BGM 입히기</h2></div>
       <p className="hint">
-        레퍼런스의 분위기에 어울리는 무료 음원을 골라 드릴게요. 들어보고 마음에 드는 트랙을 고르거나, BGM 없이 진행할 수도 있어요.
+        컷편집 + 자막까지 끝난 결과예요. 아래 영상을 재생해두고 음원을 들어보며 어울리는 트랙을 고르세요. BGM 없이 진행할 수도 있어요.
       </p>
+
+      {captionedUrl && (
+        <div className="bgm-preview">
+          <video className="bgm-preview-video" src={captionedUrl} controls playsInline loop muted />
+          <div className="bgm-preview-tag">🎬 편집 결과 (컷+자막) — 음원을 함께 재생해 어울리는지 확인</div>
+        </div>
+      )}
 
       {ref && (ref.status === 'matched' || ref.status === 'no_match') && (
         <div className="ref-bgm">
@@ -1660,7 +1743,7 @@ function BgmPanel({
           className="btn primary"
           disabled={busy || pickBusy || !pick}
           onClick={onConfirm}
-        >{pickBusy ? '준비 중…' : '✨ 이 음원으로 생성'}</button>
+        >{pickBusy ? '준비 중…' : '✨ 이 음원으로 완성'}</button>
       </div>
     </section>
   );
