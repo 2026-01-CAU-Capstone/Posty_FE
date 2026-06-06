@@ -246,6 +246,20 @@ label.full { margin-top: 4px; }
 .reanalyze-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 2px; }
 .reanalyze-actions .btn { min-width: 96px; padding: 8px 14px; font-size: 13px; }
 
+/* 진행 단계 라벨 (편집 / BGM·음성) */
+.phase-label {
+  text-align: center; font-size: 13px; font-weight: 700; color: var(--accent2);
+  margin: 2px 0 8px; letter-spacing: -0.2px;
+}
+
+/* BGM 단계 — 편집 결과 미리보기 */
+.bgm-preview { margin: 4px 0 14px; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.bgm-preview-video {
+  width: 100%; max-width: 280px; aspect-ratio: 9 / 16;
+  background: #000; border-radius: 12px; border: 1px solid var(--line);
+}
+.bgm-preview-tag { font-size: 12px; color: var(--mut); text-align: center; }
+
 /* ============================================================
    분석 상세 (말풍선 아래 항목별 분석)
    ============================================================ */
