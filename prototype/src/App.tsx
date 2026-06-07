@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, BgmCandidate, BgmCandidatesResp, Estimate, Job, OriginalVolume, PreviewFrame, StyleBrief, StyleSuggest, SuggestBrief, TtsGenMode, TtsSource, TTS_VOICES } from './api';
 import { Posty } from './Posty';
 
@@ -36,8 +36,14 @@ const PHRASE_EXAMPLES = ['오늘 퇴근 후', '꼭 가봐야 할', '딱 한 잔'
 // ============================================================
 // 훅 / 순수 헬퍼
 // ============================================================
-function usePolledJob(jobId: string | null): Job | null {
+function usePolledJob(
+  jobId: string | null,
+  recover?: (jobId: string) => Promise<Job | null>,
+): Job | null {
   const [job, setJob] = useState<Job | null>(null);
+  // recover 는 매 렌더 새로 만들어질 수 있어 ref 로 최신본만 참조 (effect 의존성에서 제외).
+  const recoverRef = useRef(recover);
+  recoverRef.current = recover;
   useEffect(() => {
     setJob(null);
     if (!jobId) return;
@@ -49,7 +55,14 @@ function usePolledJob(jobId: string | null): Job | null {
         if (!active) return;
         setJob(j);
         if (j.status === 'done' || j.status === 'error') return;
-      } catch { /* 재시도 */ }
+      } catch {
+        // job 이 사라졌을 수 있음 (예: 백엔드 재시작 → 인메모리 job Map 초기화).
+        // 복구 콜백이 디스크 산출물로 완료를 확인하면 그걸 채택하고 폴링 종료.
+        try {
+          const recovered = recoverRef.current ? await recoverRef.current(jobId) : null;
+          if (active && recovered) { setJob(recovered); return; }
+        } catch { /* 무시하고 재시도 */ }
+      }
       if (active) timer = setTimeout(tick, 1500);
     };
     timer = setTimeout(tick, 300);
@@ -193,6 +206,7 @@ export default function App() {
 
   // 진행 화면 캐러셀 프레임
   const [previewFrames, setPreviewFrames] = useState<PreviewFrame[]>([]);
+  const [framesLoading, setFramesLoading] = useState(false);
 
   // 완료 알림을 1회만 발사하기 위한 가드
   const completedNotifiedRef = useRef(false);
@@ -204,7 +218,20 @@ export default function App() {
   const [mainRetrying, setMainRetrying] = useState(false);
   const MAX_RETRIES = 3;
 
-  const stage0Job = usePolledJob(stage0JobId);
+  // 백엔드 재시작 등으로 Stage 0 job 이 사라져(404) 폴링이 멈춰도, 분석 결과(edit-spec.json)가
+  // 디스크에 있으면 "분석 완료"로 간주해 다음 단계(style-suggest→옵션)로 진행한다.
+  const recoverStage0FromSpec = async (jobId: string): Promise<Job | null> => {
+    if (!projectId) return null;
+    try {
+      const spec = await api.getEditSpec(projectId);
+      if (!spec) return null;
+      return {
+        id: jobId, type: 'stage', projectId, status: 'done',
+        progress: [], result: { recovered: true }, error: null,
+      };
+    } catch { return null; }
+  };
+  const stage0Job = usePolledJob(stage0JobId, recoverStage0FromSpec);
   const mainJob = usePolledJob(mainJobId);
 
   const stage0Done = stage0Job?.status === 'done';
@@ -244,18 +271,23 @@ export default function App() {
 
   // 진행 화면 진입 시 프레임 캐러셀 fetch
   // 캐러셀 프레임 — 옵션 단계에서 미리 추출·캐시해 둔다 (#2). 편집/완성 진행 화면에서 바로 사용.
+  // 옵션 단계의 콜드 추출(ffmpeg)이 끝나기 전에 편집으로 넘어가면 fetch 가 취소돼
+  // previewFrames 가 빈 채로 남는다 → 편집/완성 단계에서도 (비었으면) 다시 가져온다.
   useEffect(() => {
-    if (step !== 'options' || !projectId) return;
+    if (!projectId) return;
     if (previewFrames.length > 0) return;
+    if (step !== 'options' && step !== 'edit' && step !== 'final') return;
     let cancelled = false;
+    setFramesLoading(true);
     (async () => {
       try {
         const frames = await api.getPreviewFrames(projectId, 16);
         if (!cancelled) setPreviewFrames(frames);
       } catch { /* 캐러셀 실패해도 무시 */ }
+      finally { if (!cancelled) setFramesLoading(false); }
     })();
     return () => { cancelled = true; };
-  }, [step, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [step, projectId, previewFrames.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 편집(stages 1~3) 완료 → BGM 단계로. 완료된 captioned.mp4 URL 도 가져온다.
   useEffect(() => {
@@ -564,6 +596,7 @@ export default function App() {
     setGenPhase('edit'); setCaptionedUrl(null);
     setBgmResp(null); setBgmBusy(false); setBgmError(''); setBgmPick(null); setBgmPickBusy(false);
     setPreviewFrames([]);
+    setFramesLoading(false);
     setStage0Retry(0); setStage0Retrying(false); setMainRetry(0); setMainRetrying(false);
     completedNotifiedRef.current = false;
   }
@@ -753,6 +786,7 @@ export default function App() {
           now={now}
           projectId={projectId}
           frames={previewFrames}
+          framesLoading={framesLoading}
           fromStage={1}
           toStage={3}
           phaseLabel="컷편집 + 자막"
@@ -797,6 +831,7 @@ export default function App() {
               now={now}
               projectId={projectId}
               frames={previewFrames}
+              framesLoading={framesLoading}
               fromStage={4}
               toStage={4}
               phaseLabel="BGM·음성 입히기"
@@ -1490,13 +1525,14 @@ function SourceDropzone({ busy, onFiles }: { busy: boolean; onFiles: (files: Fil
 
 // 생성 진행 — 로그는 기본 숨김, "로그 확인" 버튼으로 토글
 function ProgressPanel({
-  job, estimate, now, projectId, frames, fromStage, toStage, phaseLabel, retryCount, retryMax, retrying, onReset,
+  job, estimate, now, projectId, frames, framesLoading, fromStage, toStage, phaseLabel, retryCount, retryMax, retrying, onReset,
 }: {
   job: Job | null;
   estimate: Estimate | null;
   now: number;
   projectId: string | null;
   frames: PreviewFrame[];
+  framesLoading: boolean;
   fromStage: number;
   toStage: number;
   phaseLabel?: string;
@@ -1522,7 +1558,6 @@ function ProgressPanel({
             <>
               <div className="pct">{pctInt}%</div>
               <div className="eta">{fmtClockRange(eta)}</div>
-              <div className="eta-tick">{fmtClockTicking(eta * 0.75)}</div>
             </>
           )}
         </div>
@@ -1530,6 +1565,16 @@ function ProgressPanel({
           <div className="prog-right">
             <FrameCarousel frames={frames} />
             <div className="carousel-tag">이런 장면들 위주로 작업하고 있어요</div>
+          </div>
+        )}
+        {!showError && frames.length === 0 && framesLoading && (
+          <div className="prog-right">
+            <div className="carousel-skeleton" aria-busy="true" aria-label="미리보기 불러오는 중">
+              <div className="sk side" />
+              <div className="sk center" />
+              <div className="sk side" />
+            </div>
+            <div className="carousel-tag">미리보기 불러오는 중…</div>
           </div>
         )}
       </div>
@@ -1555,6 +1600,7 @@ function ProgressPanel({
           </p>
         </>
       )}
+      <TimingDebug eta={eta} pct={pct} now={now} job={job} done={job?.status === 'done'} failed={showError} projectId={projectId} />
       <DebugLog job={job} projectId={projectId} active={!showError} />
       {showError && <div className="row"><button className="btn" onClick={onReset}>처음으로</button></div>}
     </section>
@@ -1565,19 +1611,31 @@ function ProgressPanel({
 // 진행 화면 캐러셀 — 프레임 자동 회전 + 마우스 호버 시 일시정지
 // ============================================================
 function FrameCarousel({ frames }: { frames: PreviewFrame[] }) {
+  // 프레임 순서를 한 번 무작위로 섞는다 (Fisher–Yates).
+  // - 원본 순서대로면 동시에 보이는 3장이 거의 인접(=비슷한) 장면이라 단조롭다.
+  // - 섞으면 회전 순서가 랜덤이고, 동시에 보이는 3장도 타임라인상 멀리 떨어진 장면이 된다.
+  const shuffled = useMemo(() => {
+    const a = frames.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }, [frames]);
+
   const [idx, setIdx] = useState(0);
   const [hover, setHover] = useState(false);
   useEffect(() => {
-    if (hover || frames.length <= 1) return;
-    const t = setInterval(() => setIdx(i => (i + 1) % frames.length), 1600);
+    if (hover || shuffled.length <= 1) return;
+    const t = setInterval(() => setIdx(i => (i + 1) % shuffled.length), 1600);
     return () => clearInterval(t);
-  }, [hover, frames.length]);
+  }, [hover, shuffled.length]);
 
   // 3 장이 동시에 보이는 휠 — 가운데가 활성, 좌우는 흐릿하게
   // (offset 이 음수일 수 있어 두 번 나눠야 안전한 모듈러)
   const at = (offset: number) => {
-    const n = frames.length;
-    return frames[((idx + offset) % n + n) % n];
+    const n = shuffled.length;
+    return shuffled[((idx + offset) % n + n) % n];
   };
   return (
     <div
@@ -1591,7 +1649,7 @@ function FrameCarousel({ frames }: { frames: PreviewFrame[] }) {
         <img className="carousel-slot side" src={at(1).url} alt="" />
       </div>
       <div className="carousel-dots">
-        {frames.map((_, i) => (
+        {shuffled.map((_, i) => (
           <span key={i} className={'carousel-dot ' + (i === idx ? 'on' : '')} />
         ))}
       </div>
