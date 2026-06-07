@@ -598,33 +598,40 @@ label.full { margin-top: 4px; }
 }
 .carousel-wheel {
   position: relative;
-  display: grid;
-  grid-template-columns: 18% 64% 18%;
+  /* 세로(9:16) 프레임을 크게 보여주기 위해 flex 로 3장의 세로 카드를 가운데 정렬.
+     좌우 카드는 폭을 넘겨 가장자리에서 살짝 잘리는 "peek" 효과(overflow:hidden). */
+  display: flex;
   align-items: center;
+  justify-content: center;
+  gap: 10px;
   width: 100%;
-  height: 168px;
+  height: 360px;            /* 기존 168px → 세로형에 맞게 대폭 확대 */
   border-radius: 14px;
   background: rgba(0,0,0,0.18);
   border: 1px solid rgba(255,255,255,0.04);
   overflow: hidden;
   padding: 0 4px;
-  gap: 4px;
 }
 .carousel-slot {
   display: block;
-  width: 100%; height: 100%;
+  flex: 0 0 auto;
+  /* 슬롯을 9:16 세로 카드로 — 높이를 정하면 너비는 비율에서 파생.
+     프레임이 9:16 이면 object-fit:cover 가 잘림 없이 꽉 차게 보여준다. */
+  height: 320px;
+  aspect-ratio: 9 / 16;
+  width: auto;
   object-fit: cover;
   border-radius: 10px;
   transition: opacity .35s, transform .35s, filter .35s;
 }
 .carousel-slot.center {
-  height: 96%;
+  height: 344px;            /* 가운데가 가장 큼 */
   z-index: 2;
   box-shadow: 0 8px 24px rgba(0,0,0,0.35), 0 0 0 1px rgba(185,169,240,0.35);
   animation: carousel-pop .35s ease-out;
 }
 .carousel-slot.side {
-  height: 78%;
+  height: 248px;            /* 좌우는 작게 */
   opacity: 0.35;
   filter: blur(1.5px) saturate(0.7);
   transform: scale(0.92);
@@ -652,6 +659,36 @@ label.full { margin-top: 4px; }
   color: var(--mut);
   margin-top: 6px;
   font-style: italic;
+}
+
+/* 캐러셀 로딩 스켈레톤 — 프레임 추출/불러오는 동안 빈 카드 + 쉬머 표시.
+   휠(.carousel-wheel)과 동일한 크기/형태로 자리만 잡아 레이아웃 점프를 막는다. */
+.carousel-skeleton {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  width: 100%; height: 360px;
+  border-radius: 14px;
+  background: rgba(0,0,0,0.18);
+  border: 1px solid rgba(255,255,255,0.04);
+  overflow: hidden;
+  padding: 0 4px;
+}
+.carousel-skeleton .sk {
+  flex: 0 0 auto;
+  aspect-ratio: 9 / 16;
+  width: auto;
+  border-radius: 10px;
+  background: linear-gradient(100deg,
+    rgba(255,255,255,0.04) 25%,
+    rgba(255,255,255,0.11) 50%,
+    rgba(255,255,255,0.04) 75%);
+  background-size: 220% 100%;
+  animation: sk-shimmer 1.3s ease-in-out infinite;
+}
+.carousel-skeleton .sk.center { height: 344px; }
+.carousel-skeleton .sk.side { height: 248px; opacity: 0.5; }
+@keyframes sk-shimmer {
+  0%   { background-position: 220% 0; }
+  100% { background-position: -120% 0; }
 }
 
 /* ============================================================
