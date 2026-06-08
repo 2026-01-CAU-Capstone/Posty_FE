@@ -1914,22 +1914,23 @@ function BgmPanel({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playingId, setPlayingId] = useState<string | null>(null);
 
-  const play = (cand: BgmCandidate) => {
+  // 한 번에 하나만 재생 — 무료 후보(source_url)와 유료 추천 미리듣기(preview_url) 공용.
+  const playUrl = (id: string, url: string) => {
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current = null;
     }
-    if (playingId === cand.identifier) {
+    if (playingId === id) {
       setPlayingId(null);
       return;
     }
-    const a = new Audio(cand.source_url);
+    const a = new Audio(url);
     a.volume = 0.7;
     a.onended = () => setPlayingId(null);
     a.onerror = () => setPlayingId(null);
     audioRef.current = a;
     a.play().catch(() => setPlayingId(null));
-    setPlayingId(cand.identifier);
+    setPlayingId(id);
   };
 
   useEffect(() => () => { audioRef.current?.pause(); }, []);
@@ -1987,20 +1988,35 @@ function BgmPanel({
             <div className="bgm-section">
               <div className="bgm-section-head">💰 유료·유명 음원 <span className="bgm-section-sub">분위기에 맞는 유명 곡 (영상엔 못 넣어요 · 들어보고 직접)</span></div>
               <div className="bgm-paid-list">
-                {resp.paid.map((t, i) => (
-                  <div key={i} className="bgm-paid-item">
-                    <span className="bgm-rank">{i + 1}</span>
-                    <div className="bgm-meta">
-                      <div className="bgm-title">{t.title} <span className="bgm-artist">— {t.artist}</span></div>
-                      <div className="bgm-sub">{[t.genre, t.year].filter(Boolean).join(' · ')}</div>
-                      {t.reason && <div className="bgm-reason">{t.reason}</div>}
+                {resp.paid.map((t, i) => {
+                  const pid = 'paid:' + i;
+                  const playing = playingId === pid;
+                  return (
+                    <div key={i} className="bgm-paid-item">
+                      {t.artwork
+                        ? <img className="bgm-art" src={t.artwork} alt="" />
+                        : <span className="bgm-rank">{i + 1}</span>}
+                      {t.preview_url && (
+                        <button
+                          type="button"
+                          className={'bgm-play' + (playing ? ' on' : '')}
+                          onClick={() => playUrl(pid, t.preview_url!)}
+                          aria-label={playing ? '일시정지' : '미리듣기'}
+                        >{playing ? '⏸' : '▶'}</button>
+                      )}
+                      <div className="bgm-meta">
+                        <div className="bgm-title">{t.title} <span className="bgm-artist">— {t.artist}</span></div>
+                        <div className="bgm-sub">{[t.genre, t.year].filter(Boolean).join(' · ')}{t.verified ? ' · ✓ 확인됨' : ''}</div>
+                        {t.reason && <div className="bgm-reason">{t.reason}</div>}
+                      </div>
+                      <div className="bgm-paid-links">
+                        {t.apple_url && <a href={t.apple_url} target="_blank" rel="noreferrer" className="bgm-link am">Apple ↗</a>}
+                        <a href={t.spotify_url} target="_blank" rel="noreferrer" className="bgm-link sp">Spotify ↗</a>
+                        <a href={t.youtube_url} target="_blank" rel="noreferrer" className="bgm-link yt">YouTube ↗</a>
+                      </div>
                     </div>
-                    <div className="bgm-paid-links">
-                      <a href={t.spotify_url} target="_blank" rel="noreferrer" className="bgm-link sp">Spotify ↗</a>
-                      <a href={t.youtube_url} target="_blank" rel="noreferrer" className="bgm-link yt">YouTube ↗</a>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -2021,7 +2037,7 @@ function BgmPanel({
                     <button
                       type="button"
                       className={'bgm-play' + (playing ? ' on' : '')}
-                      onClick={() => play(c)}
+                      onClick={() => playUrl(c.identifier, c.source_url)}
                       aria-label={playing ? '일시정지' : '미리듣기'}
                     >{playing ? '⏸' : '▶'}</button>
                     <div className="bgm-meta">

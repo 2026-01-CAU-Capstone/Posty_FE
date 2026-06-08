@@ -108,7 +108,7 @@ export type BgmCandidate = {
   query_used: string;
 };
 
-// 유료/유명 곡 추천 (Gemini) — 저작권상 임베드 안 함, 정보/스트리밍 검색 링크만.
+// 유료/유명 곡 추천 (Gemini + iTunes 검증) — 저작권상 임베드 안 함, 정보/링크/미리듣기만.
 export type FamousTrack = {
   title: string;
   artist: string;
@@ -117,6 +117,10 @@ export type FamousTrack = {
   reason?: string;
   spotify_url: string;
   youtube_url: string;
+  apple_url?: string;     // Apple Music/iTunes 곡 페이지
+  preview_url?: string;   // 30초 미리듣기 (m4a)
+  artwork?: string;       // 앨범 아트 썸네일
+  verified?: boolean;     // iTunes 실존 확인됨
 };
 
 export type ReferenceBgm = {
