@@ -108,6 +108,17 @@ export type BgmCandidate = {
   query_used: string;
 };
 
+// 유료/유명 곡 추천 (Gemini) — 저작권상 임베드 안 함, 정보/스트리밍 검색 링크만.
+export type FamousTrack = {
+  title: string;
+  artist: string;
+  year?: string;
+  genre?: string;
+  reason?: string;
+  spotify_url: string;
+  youtube_url: string;
+};
+
 export type ReferenceBgm = {
   status: 'no_token' | 'no_match' | 'matched' | 'error';
   title?: string;
@@ -122,7 +133,8 @@ export type ReferenceBgm = {
 
 export type BgmCandidatesResp = {
   referenceBgm: ReferenceBgm | null;
-  candidates: BgmCandidate[];
+  paid: FamousTrack[];          // 유료/유명 곡 추천 (정보·링크)
+  free: BgmCandidate[];         // 무료 음원 (선택 시 영상에 입힘)
   profile: any | null;
   cached: boolean;
 };
@@ -268,7 +280,8 @@ export const api = {
     );
     return {
       referenceBgm: d.referenceBgm || null,
-      candidates: d.candidates || [],
+      paid: d.paid || [],
+      free: d.free || [],
       profile: d.profile || null,
       cached: !!d.cached,
     };

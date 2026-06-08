@@ -263,8 +263,8 @@ export default function App() {
         const r = await api.getBgmCandidates(projectId);
         if (cancelled) return;
         setBgmResp(r);
-        // 기본 선택: 첫번째 후보
-        if (r.candidates.length > 0) setBgmPick(r.candidates[0].identifier);
+        // 기본 선택: 첫번째 무료 후보 (유료 곡은 임베드 불가라 선택 대상 아님)
+        if (r.free.length > 0) setBgmPick(r.free[0].identifier);
         else setBgmPick('none');
       } catch (e: any) {
         if (!cancelled) setBgmError(e.message || String(e));
@@ -635,7 +635,7 @@ export default function App() {
       if (bgmPick === 'none') {
         await api.pickBgm(projectId, { none: true });
       } else {
-        const cand = bgmResp?.candidates.find(c => c.identifier === bgmPick);
+        const cand = bgmResp?.free.find(c => c.identifier === bgmPick);
         if (!cand) throw new Error('선택된 후보를 찾을 수 없습니다');
         await api.pickBgm(projectId, {
           identifier: cand.identifier,
@@ -1955,28 +1955,25 @@ function BgmPanel({
 
         {/* 우 — 레퍼런스 음원 정보 + 후보 리스트 */}
         <div className="side-pane">
-      {ref && (ref.status === 'matched' || ref.status === 'no_match') && (
-        <div className="ref-bgm">
-          <div className="ref-bgm-head">🎵 레퍼런스 영상의 음원</div>
-          {refKnown ? (
-            <div className="ref-bgm-body">
-              <div className="ref-bgm-title">{ref.title}{ref.artist ? ` — ${ref.artist}` : ''}</div>
-              {ref.album && <div className="ref-bgm-sub">{ref.album}{ref.release_date ? ` · ${ref.release_date.slice(0, 4)}` : ''}</div>}
-              {ref.genres && ref.genres.length > 0 && (
-                <div className="ref-bgm-chips">
-                  {ref.genres.slice(0, 4).map(g => <span className="chip" key={g}>{g}</span>)}
-                </div>
-              )}
-              <div className="ref-bgm-links">
-                {ref.spotify_url && <a href={ref.spotify_url} target="_blank" rel="noreferrer" className="ref-bgm-link">Spotify ↗</a>}
-                {ref.apple_url && <a href={ref.apple_url} target="_blank" rel="noreferrer" className="ref-bgm-link">Apple Music ↗</a>}
-                {ref.song_link && <a href={ref.song_link} target="_blank" rel="noreferrer" className="ref-bgm-link">기타 링크 ↗</a>}
+      {/* 1) 레퍼런스 원곡 — 맨 위 (식별됐을 때만, 강조) */}
+      {refKnown && (
+        <div className="ref-bgm ref-bgm-top">
+          <div className="ref-bgm-head">🎯 레퍼런스가 쓴 곡 <span className="ref-bgm-badge">원곡</span></div>
+          <div className="ref-bgm-body">
+            <div className="ref-bgm-title">{ref?.title}{ref?.artist ? ` — ${ref?.artist}` : ''}</div>
+            {ref?.album && <div className="ref-bgm-sub">{ref?.album}{ref?.release_date ? ` · ${ref?.release_date.slice(0, 4)}` : ''}</div>}
+            {ref?.genres && ref.genres.length > 0 && (
+              <div className="ref-bgm-chips">
+                {ref.genres.slice(0, 4).map(g => <span className="chip" key={g}>{g}</span>)}
               </div>
-              <div className="ref-bgm-note">상용곡이라 그대로 쓸 수는 없어서, 비슷한 분위기의 무료 음원을 골라뒀어요.</div>
+            )}
+            <div className="ref-bgm-links">
+              {ref?.spotify_url && <a href={ref.spotify_url} target="_blank" rel="noreferrer" className="bgm-link sp">Spotify ↗</a>}
+              {ref?.apple_url && <a href={ref.apple_url} target="_blank" rel="noreferrer" className="bgm-link am">Apple Music ↗</a>}
+              {ref?.song_link && <a href={ref.song_link} target="_blank" rel="noreferrer" className="bgm-link">기타 ↗</a>}
             </div>
-          ) : (
-            <div className="ref-bgm-sub">레퍼런스의 BGM 을 정확히 식별하지 못했어요. 대신 분위기로 추천한 무료 음원에서 골라보세요.</div>
-          )}
+            <div className="ref-bgm-note">상용곡이라 영상엔 바로 못 넣어요. 아래 추천 곡을 듣고 직접 준비하거나, 무료 음원을 입히세요.</div>
+          </div>
         </div>
       )}
 
@@ -1985,49 +1982,65 @@ function BgmPanel({
 
       {resp && (
         <>
-          <div className="bgm-list">
-            {resp.candidates.map((c, i) => {
-              const checked = pick === c.identifier;
-              const playing = playingId === c.identifier;
-              return (
-                <div key={c.identifier} className={'bgm-item' + (checked ? ' on' : '')}>
-                  <label className="bgm-item-pick">
-                    <input
-                      type="radio"
-                      name="bgm-pick"
-                      checked={checked}
-                      onChange={() => setPick(c.identifier)}
-                    />
-                    <span className="bgm-radio" />
-                  </label>
-                  <button
-                    type="button"
-                    className={'bgm-play' + (playing ? ' on' : '')}
-                    onClick={() => play(c)}
-                    aria-label={playing ? '일시정지' : '미리듣기'}
-                  >{playing ? '⏸' : '▶'}</button>
-                  <div className="bgm-meta">
-                    <div className="bgm-title">{c.title || `Track ${i + 1}`}</div>
-                    <div className="bgm-sub">
-                      {fmtDur(c.duration_sec)} · Internet Archive
+          {/* 2) 유료·유명 음원 추천 (정보·링크만 — 임베드 X) */}
+          {resp.paid.length > 0 && (
+            <div className="bgm-section">
+              <div className="bgm-section-head">💰 유료·유명 음원 <span className="bgm-section-sub">분위기에 맞는 유명 곡 (영상엔 못 넣어요 · 들어보고 직접)</span></div>
+              <div className="bgm-paid-list">
+                {resp.paid.map((t, i) => (
+                  <div key={i} className="bgm-paid-item">
+                    <span className="bgm-rank">{i + 1}</span>
+                    <div className="bgm-meta">
+                      <div className="bgm-title">{t.title} <span className="bgm-artist">— {t.artist}</span></div>
+                      <div className="bgm-sub">{[t.genre, t.year].filter(Boolean).join(' · ')}</div>
+                      {t.reason && <div className="bgm-reason">{t.reason}</div>}
+                    </div>
+                    <div className="bgm-paid-links">
+                      <a href={t.spotify_url} target="_blank" rel="noreferrer" className="bgm-link sp">Spotify ↗</a>
+                      <a href={t.youtube_url} target="_blank" rel="noreferrer" className="bgm-link yt">YouTube ↗</a>
                     </div>
                   </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* 3) 무료 음원 (선택 시 영상에 입힘) */}
+          <div className="bgm-section">
+            <div className="bgm-section-head">🆓 무료 음원 <span className="bgm-section-sub">선택하면 영상에 입혀져요</span></div>
+            <div className="bgm-list">
+              {resp.free.map((c, i) => {
+                const checked = pick === c.identifier;
+                const playing = playingId === c.identifier;
+                return (
+                  <div key={c.identifier} className={'bgm-item' + (checked ? ' on' : '')}>
+                    <label className="bgm-item-pick">
+                      <input type="radio" name="bgm-pick" checked={checked} onChange={() => setPick(c.identifier)} />
+                      <span className="bgm-radio" />
+                    </label>
+                    <button
+                      type="button"
+                      className={'bgm-play' + (playing ? ' on' : '')}
+                      onClick={() => play(c)}
+                      aria-label={playing ? '일시정지' : '미리듣기'}
+                    >{playing ? '⏸' : '▶'}</button>
+                    <div className="bgm-meta">
+                      <div className="bgm-title">{c.title || `Track ${i + 1}`}</div>
+                      <div className="bgm-sub">{fmtDur(c.duration_sec)} · Internet Archive</div>
+                    </div>
+                  </div>
+                );
+              })}
+              {resp.free.length === 0 && <div className="bgm-empty">어울리는 무료 음원을 찾지 못했어요. 위 추천 곡을 참고하거나 BGM 없이 진행하세요.</div>}
+              <div className={'bgm-item bgm-none' + (pick === 'none' ? ' on' : '')}>
+                <label className="bgm-item-pick">
+                  <input type="radio" name="bgm-pick" checked={pick === 'none'} onChange={() => setPick('none')} />
+                  <span className="bgm-radio" />
+                </label>
+                <div className="bgm-meta">
+                  <div className="bgm-title">BGM 없이 진행</div>
+                  <div className="bgm-sub">원본 영상 사운드만 사용</div>
                 </div>
-              );
-            })}
-            <div className={'bgm-item bgm-none' + (pick === 'none' ? ' on' : '')}>
-              <label className="bgm-item-pick">
-                <input
-                  type="radio"
-                  name="bgm-pick"
-                  checked={pick === 'none'}
-                  onChange={() => setPick('none')}
-                />
-                <span className="bgm-radio" />
-              </label>
-              <div className="bgm-meta">
-                <div className="bgm-title">BGM 없이 진행</div>
-                <div className="bgm-sub">원본 영상 사운드만 사용</div>
               </div>
             </div>
           </div>
