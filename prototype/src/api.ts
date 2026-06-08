@@ -54,6 +54,7 @@ export type SuggestBrief = {
   must_include_phrases: string[];
   caption_language: '' | 'ko' | 'en' | 'mixed';
   caption_density: '' | 'every_cut' | 'most_cuts' | 'occasional' | 'minimal' | 'none';
+  caption_mode: '' | 'per_scene' | 'brand_title' | 'continuous' | 'none';
 };
 
 export type AnalysisPoint = {
@@ -87,6 +88,11 @@ export type AudioConfig = {
   originalVolume: OriginalVolume;
 };
 
+// 컷편집 설정 — lib/cut-config.ts 미러. target_sec: 0=레퍼런스 따라가기, >0=목표 길이(초).
+export type CutConfig = {
+  target_sec: number;
+};
+
 export type PreviewFrame = {
   url: string;
   source: 'reference' | 'source';
@@ -100,6 +106,17 @@ export type BgmCandidate = {
   duration_sec: number;
   size_bytes: number;
   query_used: string;
+};
+
+// 유료/유명 곡 추천 (Gemini) — 저작권상 임베드 안 함, 정보/스트리밍 검색 링크만.
+export type FamousTrack = {
+  title: string;
+  artist: string;
+  year?: string;
+  genre?: string;
+  reason?: string;
+  spotify_url: string;
+  youtube_url: string;
 };
 
 export type ReferenceBgm = {
@@ -116,7 +133,8 @@ export type ReferenceBgm = {
 
 export type BgmCandidatesResp = {
   referenceBgm: ReferenceBgm | null;
-  candidates: BgmCandidate[];
+  paid: FamousTrack[];          // 유료/유명 곡 추천 (정보·링크)
+  free: BgmCandidate[];         // 무료 음원 (선택 시 영상에 입힘)
   profile: any | null;
   cached: boolean;
 };
@@ -226,6 +244,11 @@ export const api = {
     await jsonReq('/api/audio-config', { method: 'POST', body: JSON.stringify({ projectId, audio }) });
   },
 
+  // 컷편집 설정(영상 목표 길이 등) 저장
+  async saveCutConfig(projectId: string, cut: Partial<CutConfig>): Promise<void> {
+    await jsonReq('/api/cut-config', { method: 'POST', body: JSON.stringify({ projectId, cut }) });
+  },
+
   // 레퍼런스 분석 결과(edit-spec.json) 전체 — 디버그 표시용
   async getEditSpec(projectId: string): Promise<any | null> {
     const d = await jsonReq('/api/edit-spec?projectId=' + encodeURIComponent(projectId));
@@ -257,7 +280,8 @@ export const api = {
     );
     return {
       referenceBgm: d.referenceBgm || null,
-      candidates: d.candidates || [],
+      paid: d.paid || [],
+      free: d.free || [],
       profile: d.profile || null,
       cached: !!d.cached,
     };

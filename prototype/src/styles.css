@@ -153,8 +153,11 @@ label.full { margin-top: 4px; }
 /* ============================================================
    단계 인디케이터 + 네비게이션 (마법사)
    ============================================================ */
-.stepind { display: flex; align-items: center; justify-content: center; gap: 6px; margin: 4px 0 18px; flex-wrap: wrap; }
+/* 단계 인디케이터 — 4개씩 끊어 2줄로 배치(둘 다 왼→오). */
+.stepind { display: flex; flex-direction: column; align-items: center; gap: 8px; margin: 4px 0 18px; }
+.stepind-row { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; }
 .sind { display: flex; align-items: center; gap: 7px; color: var(--mut); font-size: 13px; }
+/* 줄 안에서 항목 사이만 연결선. 각 줄의 마지막 항목엔 선을 그리지 않음. */
 .sind:not(:last-child)::after { content: ''; width: 18px; height: 2px; border-radius: 2px; background: var(--line); margin-left: 4px; }
 .sind .dot {
   width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
@@ -259,6 +262,58 @@ label.full { margin-top: 4px; }
   background: #000; border-radius: 12px; border: 1px solid var(--line);
 }
 .bgm-preview-tag { font-size: 12px; color: var(--mut); text-align: center; }
+
+/* ============================================================
+   2단 레이아웃 — 영상(좌) + 설정/목록(우). 자막·BGM 단계 공용.
+   ============================================================ */
+.side-split {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) 1fr;
+  gap: 22px;
+  align-items: start;
+  margin: 6px 0 4px;
+}
+.side-video {
+  position: sticky; top: 12px;
+  display: flex; flex-direction: column; gap: 7px;
+}
+.side-video-el {
+  width: 100%; aspect-ratio: 9 / 16;
+  background: #000; border-radius: 12px; border: 1px solid var(--line);
+}
+.side-video-ph {
+  width: 100%; aspect-ratio: 9 / 16;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,0.03); border: 1px dashed var(--line);
+  border-radius: 12px; color: var(--mut); font-size: 13px;
+}
+.side-video-tag { font-size: 11.5px; color: var(--mut); text-align: center; line-height: 1.4; }
+.side-pane { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+
+/* 자막 검토 — 생성된 컷별 자막 목록 */
+.cap-review {
+  border: 1px solid var(--line); border-radius: 12px;
+  background: rgba(255,255,255,0.02); padding: 10px 12px;
+}
+.cap-review-head { font-size: 13px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.cap-review-count {
+  font-size: 11px; color: var(--mut);
+  background: rgba(255,255,255,0.06); border-radius: 999px; padding: 1px 8px;
+}
+.cap-review-empty { font-size: 12.5px; color: var(--mut); }
+.cap-review-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
+.cap-review-item { display: flex; gap: 9px; align-items: baseline; font-size: 13px; }
+.cap-review-t { flex: 0 0 auto; font-variant-numeric: tabular-nums; color: var(--accent2); font-size: 11.5px; min-width: 42px; }
+.cap-review-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cap-review-line { word-break: break-word; }
+.cap-settings { display: flex; flex-direction: column; gap: 10px; }
+
+.nav-group { display: flex; gap: 8px; }
+
+@media (max-width: 620px) {
+  .side-split { grid-template-columns: 1fr; gap: 14px; }
+  .side-video { position: static; max-width: 280px; margin: 0 auto; }
+}
 
 /* ============================================================
    분석 상세 (말풍선 아래 항목별 분석)
@@ -792,4 +847,55 @@ label.full { margin-top: 4px; }
 }
 .bgm-sub { font-size: 11.5px; color: var(--mut); margin-top: 2px; }
 .bgm-none { background: transparent; border-style: dashed; }
+
+/* ── BGM 섹션 (유료/무료 분리) + 레퍼런스 원곡 ── */
+.bgm-section { margin-top: 14px; }
+.bgm-section:first-child { margin-top: 0; }
+.bgm-section-head {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+  font-size: 13px; font-weight: 700; color: var(--txt); margin-bottom: 8px;
+}
+.bgm-section-sub { font-size: 11px; font-weight: 400; color: var(--mut); }
+.bgm-empty { font-size: 12.5px; color: var(--mut); padding: 8px 2px; }
+
+/* 레퍼런스 원곡 — 맨 위 강조 */
+.ref-bgm-top {
+  border: 1px solid var(--accent2);
+  background: linear-gradient(135deg, rgba(185,169,240,.10), rgba(242,169,196,.06));
+  border-radius: 12px; padding: 11px 13px; margin-bottom: 14px;
+}
+.ref-bgm-badge {
+  font-size: 10px; font-weight: 700; color: var(--ink);
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  border-radius: 999px; padding: 1px 8px; margin-left: 4px;
+}
+
+/* 유료/유명 추천 카드 */
+.bgm-paid-list { display: flex; flex-direction: column; gap: 8px; }
+.bgm-paid-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; background: var(--card2);
+  border: 1px solid var(--line); border-radius: 10px;
+}
+.bgm-rank {
+  flex: 0 0 auto; width: 20px; height: 20px; border-radius: 6px;
+  display: grid; place-items: center;
+  font-size: 11px; font-weight: 700; color: var(--mut);
+  background: rgba(255,255,255,.05);
+}
+.bgm-artist { font-weight: 400; color: var(--mut); }
+.bgm-reason { font-size: 11.5px; color: var(--accent2); margin-top: 3px; line-height: 1.35; }
+.bgm-paid-links { flex: 0 0 auto; display: flex; flex-direction: column; gap: 5px; }
+
+/* 스트리밍 링크 버튼 */
+.bgm-link {
+  font-size: 11px; font-weight: 600; text-decoration: none;
+  color: var(--txt); border: 1px solid var(--line); border-radius: 7px;
+  padding: 3px 9px; white-space: nowrap; text-align: center;
+  transition: border-color .15s, color .15s;
+}
+.bgm-link:hover { border-color: var(--accent2); color: var(--accent2); }
+.bgm-link.sp:hover { border-color: #1db954; color: #1db954; }
+.bgm-link.yt:hover { border-color: #ff4444; color: #ff6666; }
+.ref-bgm-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
 
