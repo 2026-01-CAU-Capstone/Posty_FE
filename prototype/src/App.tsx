@@ -1872,7 +1872,7 @@ function CaptionPanel({
               <textarea className="inp" rows={2} placeholder="예: 감성적인 톤, 첫 컷에 가게 이름 크게"
                 value={extraNotes} onChange={e => setExtraNotes(e.target.value)} />
             </label>
-            {generated && <p className="hint">설정·메모를 바꾸고 <b>재생성</b>하면 같은 컷에 자막만 다시 만들어요 (컷 재편집 없음).</p>}
+            {generated && <p className="hint"><b>재생성</b>을 누르면 같은 컷·스타일은 그대로 두고 자막 <b>문구만 새로</b> 바꿔요 (누를 때마다 다른 문구 · 컷 재편집 없음). 설정·메모를 바꾸면 그 방향으로 반영돼요.</p>}
           </div>
         </div>
       </div>
