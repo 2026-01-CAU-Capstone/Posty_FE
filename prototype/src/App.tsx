@@ -680,9 +680,11 @@ export default function App() {
       <header className="hd">
         <div className="logo"><Posty size={46} variant="logo" working={stage0Running || mainRunning} /><h1>Posty</h1></div>
         <p>레퍼런스 릴스의 스타일로 내 영상을 자동 편집</p>
-        <span className={'status ' + (online ? 'on' : online === false ? 'off' : '')}>
-          {online == null ? '서버 확인 중…' : online ? '백엔드 연결됨' : '백엔드 미연결 (cd backend → npm run dev)'}
-        </span>
+        {online !== true && (
+          <span className={'status ' + (online === false ? 'off' : '')}>
+            {online == null ? '서버 확인 중…' : '백엔드 미연결 (cd backend → npm run dev)'}
+          </span>
+        )}
       </header>
 
       <StepIndicator step={step} />
@@ -702,7 +704,7 @@ export default function App() {
           {refError && <div className="err">{refError}</div>}
           <div className="nav">
             <span />
-            <button className="btn primary" onClick={startReference}>분석 시작하고 다음 →</button>
+            <button className="btn primary" onClick={startReference}>분석 시작</button>
           </div>
         </section>
       )}
@@ -935,7 +937,7 @@ export default function App() {
               framesLoading={framesLoading}
               fromStage={4}
               toStage={4}
-              phaseLabel="BGM·음성 입히기"
+              phaseLabel={bgmPick === 'none' && !ttsEnabled ? '영상 렌더링·마무리' : 'BGM·음성 입히기'}
               retryCount={mainRetry}
               retryMax={MAX_RETRIES}
               retrying={mainRetrying}
@@ -1709,7 +1711,7 @@ function ProgressPanel({
             </p>
           )}
           <p className="hint center close-tab-hint">
-            이 탭을 닫아두셔도 괜찮아요. 완료되면 알려드릴게요.
+            이 창을 켜둔 상태로 벗어나셔도 좋아요. 완료되면 알려드릴게요.
           </p>
         </>
       )}
@@ -2072,7 +2074,11 @@ function BgmPanel({
           className="btn primary"
           disabled={busy || pickBusy || !pick}
           onClick={onConfirm}
-        >{pickBusy ? '준비 중…' : '✨ 이 음원으로 완성'}</button>
+        >{pickBusy
+          ? '영상 만드는 중…'
+          : pick === 'none'
+            ? '🎬 BGM 없이 영상 받으러 가기'
+            : '✨ 이 음원으로 영상 받으러 가기'}</button>
       </div>
     </section>
   );
