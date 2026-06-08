@@ -8,13 +8,14 @@ const STAGE_NAMES = ['레퍼런스 분석', '컷편집', '색보정', '자막', 
 //   'edit'  = stages 1~3 (컷편집/색보정/자막) 진행. 끝나면 결과를 미리 보여줌.
 //   'bgm'   = 편집 결과를 보면서 BGM 을 골라 입혀봄.
 //   'final' = stage 4 (BGM/음성) 적용 → 최종 결과.
-type Step = 'ref' | 'sources' | 'waiting' | 'options' | 'edit' | 'bgm' | 'final';
+type Step = 'ref' | 'sources' | 'waiting' | 'options' | 'edit' | 'caption' | 'bgm' | 'final';
 const STEPS: { key: Step; label: string }[] = [
   { key: 'ref',      label: '레퍼런스' },
   { key: 'sources',  label: '소스' },
   { key: 'waiting',  label: '분석' },
   { key: 'options',  label: '옵션' },
-  { key: 'edit',     label: '편집' },
+  { key: 'edit',     label: '컷편집' },
+  { key: 'caption',  label: '자막' },
   { key: 'bgm',      label: 'BGM' },
   { key: 'final',    label: '완성' },
 ];
@@ -172,7 +173,7 @@ export default function App() {
   const [brief, setBrief] = useState<SuggestBrief>({
     tone: '', purpose: '',
     topic_keywords: [], must_include_phrases: [],
-    caption_language: '', caption_density: '',
+    caption_language: '', caption_density: '', caption_mode: '',
   });
   // tone / purpose 는 단일 선택. 후보 풀(추천 + 사용자 추가)을 관리.
   const [tonePool, setTonePool] = useState<string[]>([]);
@@ -192,10 +193,15 @@ export default function App() {
   const [stage0JobId, setStage0JobId] = useState<string | null>(null);
   const [mainJobId, setMainJobId] = useState<string | null>(null);
   const [genError, setGenError] = useState('');
-  // 생성 단계 구분: 'edit'(stages 1~3) → 'final'(stage 4). mainJob 을 두 잡에 재사용.
-  const [genPhase, setGenPhase] = useState<'edit' | 'final'>('edit');
+  // 생성 단계 구분: 'edit'(컷+보정 1~2) → 'caption'(자막 3) → 'final'(stage 4). mainJob 재사용.
+  const [genPhase, setGenPhase] = useState<'edit' | 'caption' | 'final'>('edit');
+  const [gradedUrl, setGradedUrl] = useState<string | null>(null);
+  // 컷편집 옵션 — 영상 목표 길이(초). 0 = 레퍼런스 따라가기.
+  const [cutTargetSec, setCutTargetSec] = useState<number>(0);
   // 편집(컷+자막) 결과 영상 URL — BGM 단계에서 미리보기로 보여줌.
   const [captionedUrl, setCaptionedUrl] = useState<string | null>(null);
+  // 자막 검토용 — 생성된 컷별 자막 텍스트 (editPlan.items 에서 추출).
+  const [captionList, setCaptionList] = useState<{ start: number; layers: string[] }[]>([]);
 
   // BGM 선택 상태
   const [bgmResp, setBgmResp] = useState<BgmCandidatesResp | null>(null);
@@ -289,7 +295,7 @@ export default function App() {
     return () => { cancelled = true; };
   }, [step, projectId, previewFrames.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 편집(stages 1~3) 완료 → BGM 단계로. 완료된 captioned.mp4 URL 도 가져온다.
+  // 컷+보정(stages 1~2) 완료 → 자막 설정 단계로. 편집본(graded.mp4) 미리보기 URL 도 가져온다.
   useEffect(() => {
     if (step !== 'edit') return;
     if (genPhase !== 'edit') return;
@@ -298,10 +304,40 @@ export default function App() {
     (async () => {
       try {
         const proj = await api.getProject(projectId!);
-        const rel = proj?.paths?.captionedMp4;
-        if (!cancelled && rel) setCaptionedUrl(api.fileUrl(rel));
+        const rel = proj?.paths?.gradedMp4 || proj?.paths?.cutMp4;
+        if (!cancelled && rel) setGradedUrl(api.fileUrl(rel));
       } catch { /* 미리보기 없어도 진행 */ }
-      if (!cancelled) setStep('bgm');
+      if (!cancelled) setStep('caption');
+    })();
+    return () => { cancelled = true; };
+  }, [step, genPhase, mainJob?.status, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 자막 생성(stage 3) 완료 → BGM 으로 자동 이동하지 않고 "검토 화면"에 머문다.
+  // 캡션된 영상 URL + 생성된 컷별 자막 텍스트를 가져와 사용자가 확인/재생성할 수 있게 한다.
+  useEffect(() => {
+    if (step !== 'caption') return;
+    if (genPhase !== 'caption') return;
+    if (mainJob?.status !== 'done') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const proj = await api.getProject(projectId!);
+        const rel = proj?.paths?.captionedMp4;
+        const items: any[] = proj?.artifacts?.editPlan?.items || [];
+        const list = items
+          .map((it) => ({
+            start: Number(it.output_start) || 0,
+            layers: (Array.isArray(it.planned_caption_layers) ? it.planned_caption_layers : [])
+              .map((l: any) => String(l?.text || '').trim())
+              .filter(Boolean),
+          }))
+          .filter((c) => c.layers.length > 0);
+        if (!cancelled) {
+          setCaptionList(list);
+          // captionedUrl 은 마지막에 설정 — 이 값이 채워지면 렌더가 진행→검토 화면으로 전환된다.
+          if (rel) setCaptionedUrl(api.fileUrl(rel) + '&t=' + Date.now()); // 재생성 시 캐시 무효화
+        }
+      } catch { /* 미리보기 없어도 검토는 가능 */ }
     })();
     return () => { cancelled = true; };
   }, [step, genPhase, mainJob?.status, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -340,10 +376,12 @@ export default function App() {
     if (mainJob?.status !== 'error') return;
     if (mainRetry >= MAX_RETRIES) return;
     if (mainRetrying) return;
-    const toStage = genPhase === 'edit' ? 3 : 4;
+    const toStage = genPhase === 'edit' ? 2 : genPhase === 'caption' ? 3 : 4;
     let restartFrom: number;
     if (genPhase === 'final') {
       restartFrom = 4;
+    } else if (genPhase === 'caption') {
+      restartFrom = 3;
     } else {
       let lastDone = 0;
       for (const p of mainJob.progress || []) {
@@ -425,6 +463,7 @@ export default function App() {
           must_include_phrases: [...s.brief.must_include_phrases],
           caption_language: s.brief.caption_language,
           caption_density: s.brief.caption_density,
+          caption_mode: s.brief.caption_mode || '',
         });
         setTonePool(dedupeMerge(TONE_EXAMPLES, s.brief.tone ? [s.brief.tone] : []));
         setPurposePool(dedupeMerge(PURPOSE_EXAMPLES, s.brief.purpose ? [s.brief.purpose] : []));
@@ -516,6 +555,7 @@ export default function App() {
       const payload: StyleBrief = {
         caption_language: brief.caption_language,
         caption_density: brief.caption_density,
+        caption_mode: brief.caption_mode,
         tone: brief.tone.trim(),
         purpose: brief.purpose.trim(),
         topic_keywords: brief.topic_keywords.slice(0, 20),
@@ -533,14 +573,47 @@ export default function App() {
         voice: ttsVoice,
         script: ttsScript.trim(),
       });
+      await api.saveCutConfig(projectId, { target_sec: cutTargetSec });
       await refreshEstimate(projectId);
-      const jobId = await api.run(projectId, { mode: 'all', from: 1, to: 3 });
+      // 컷+보정만 먼저(1~2). 자막은 편집본을 본 뒤 'caption' 단계에서 생성한다.
+      const jobId = await api.run(projectId, { mode: 'all', from: 1, to: 2 });
       setGenPhase('edit');
       setMainRetry(0); setMainRetrying(false);
-      setCaptionedUrl(null);
+      setCaptionedUrl(null); setGradedUrl(null); setCaptionList([]);
       completedNotifiedRef.current = false;
       setMainJobId(jobId);
       setStep('edit');
+    } catch (e: any) {
+      setGenError(e.message || String(e));
+    }
+  }
+
+  // 자막 설정 단계 "자막 생성" — 갱신된 자막 설정 저장 후 Stage 3(자막 플래닝+burn)만 실행.
+  // (편집본을 보고 정한 분위기/방식으로 자막을 생성. 자막만 다시 만들 수 있어 컷 재편집 불필요.)
+  async function generateCaptions() {
+    if (!projectId) return;
+    setGenError('');
+    try {
+      const payload: StyleBrief = {
+        caption_language: brief.caption_language,
+        caption_density: brief.caption_density,
+        caption_mode: brief.caption_mode,
+        tone: brief.tone.trim(),
+        purpose: brief.purpose.trim(),
+        topic_keywords: brief.topic_keywords.slice(0, 20),
+        must_include_phrases: brief.must_include_phrases.slice(0, 10),
+        extra_notes: extraNotes.trim(),
+      };
+      await api.saveStyleBrief(projectId, payload);
+      await api.saveStyleNote(projectId, extraNotes.trim());
+      const jobId = await api.run(projectId, { mode: 'stage', stage: 3 });
+      setGenPhase('caption');
+      setMainRetry(0); setMainRetrying(false);
+      setCaptionedUrl(null);   // null 이면 렌더가 진행 화면을 보여줌 (완료 시 검토 화면으로)
+      setCaptionList([]);
+      completedNotifiedRef.current = false;
+      setMainJobId(jobId);
+      // step 은 'caption' 유지 → 아래 렌더가 진행률을 보여줌.
     } catch (e: any) {
       setGenError(e.message || String(e));
     }
@@ -588,12 +661,13 @@ export default function App() {
     setRefMode('url'); setRefUrl(''); setRefFile(null); setRefStarted(false); setRefError('');
     setUploadedSources([]); setSrcError('');
     setSuggest(null); setSuggestError(''); setSuggestBusy(false);
-    setBrief({ tone: '', purpose: '', topic_keywords: [], must_include_phrases: [], caption_language: '', caption_density: '' });
+    setBrief({ tone: '', purpose: '', topic_keywords: [], must_include_phrases: [], caption_language: '', caption_density: '', caption_mode: '' });
     setTonePool([]); setPurposePool([]); setExtraNotes('');
+    setCutTargetSec(0); setGradedUrl(null); setGenPhase('edit');
     setOriginalAudio('mute');
     setTtsEnabled(false); setTtsSource('captions'); setTtsGenMode('auto'); setTtsScript(''); setTtsVoice('Kore');
     setStage0JobId(null); setMainJobId(null); setGenError('');
-    setGenPhase('edit'); setCaptionedUrl(null);
+    setGenPhase('edit'); setCaptionedUrl(null); setCaptionList([]);
     setBgmResp(null); setBgmBusy(false); setBgmError(''); setBgmPick(null); setBgmPickBusy(false);
     setPreviewFrames([]);
     setFramesLoading(false);
@@ -692,7 +766,7 @@ export default function App() {
               <AnalysisDetail points={suggest.analysis} />
             </>
           )}
-          <div className="cardhead"><span className="num">4</span><h2>편집 옵션 <small>(추천이 미리 채워져 있어요 — 자유 수정)</small></h2></div>
+          <div className="cardhead"><span className="num">4</span><h2>컷편집 옵션 <small>(영상 길이·톤 — 자막은 컷 본 뒤 설정합니다)</small></h2></div>
 
           <ChipSingle
             label="톤 / 분위기"
@@ -733,30 +807,20 @@ export default function App() {
           />
 
           <div className="grid">
-            <label>자막 언어
-              <select className="inp" value={brief.caption_language}
-                onChange={e => setBrief(b => ({ ...b, caption_language: e.target.value as SuggestBrief['caption_language'] }))}>
-                <option value="">레퍼런스 따라가기</option>
-                <option value="ko">한국어</option>
-                <option value="en">영어</option>
-                <option value="mixed">한+영 혼합</option>
-              </select>
-            </label>
-            <label>자막 빈도
-              <select className="inp" value={brief.caption_density}
-                onChange={e => setBrief(b => ({ ...b, caption_density: e.target.value as SuggestBrief['caption_density'] }))}>
-                <option value="">레퍼런스 따라가기</option>
-                <option value="every_cut">모든 컷</option>
-                <option value="most_cuts">대부분 컷</option>
-                <option value="occasional">가끔</option>
-                <option value="minimal">최소</option>
-                <option value="none">자막 없음</option>
+            <label>영상 길이
+              <select className="inp" value={String(cutTargetSec)}
+                onChange={e => setCutTargetSec(Number(e.target.value))}>
+                <option value="0">레퍼런스 따라가기</option>
+                <option value="15">약 15초</option>
+                <option value="30">약 30초</option>
+                <option value="45">약 45초</option>
+                <option value="60">약 60초</option>
               </select>
             </label>
           </div>
 
           <label className="full">추가 메모
-            <textarea className="inp" rows={2} placeholder="자유롭게 — 예: 첫 컷에 가게 이름 크게"
+            <textarea className="inp" rows={2} placeholder="자유롭게 — 예: 발랄한 톤, 빠른 컷"
               value={extraNotes} onChange={e => setExtraNotes(e.target.value)} />
           </label>
 
@@ -773,7 +837,7 @@ export default function App() {
           {genError && <div className="err">{genError}</div>}
           <div className="nav">
             <button className="btn" onClick={() => setStep('waiting')}>← 이전</button>
-            <button className="btn primary" disabled={!stage0Done} onClick={startEditing}>편집 시작 (컷+자막) →</button>
+            <button className="btn primary" disabled={!stage0Done} onClick={startEditing}>편집 시작 (컷+보정) →</button>
           </div>
         </section>
       )}
@@ -788,13 +852,50 @@ export default function App() {
           frames={previewFrames}
           framesLoading={framesLoading}
           fromStage={1}
-          toStage={3}
-          phaseLabel="컷편집 + 자막"
+          toStage={2}
+          phaseLabel="컷편집 + 보정"
           retryCount={mainRetry}
           retryMax={MAX_RETRIES}
           retrying={mainRetrying}
           onReset={resetAll}
         />
+      )}
+
+      {/* ── STEP: 자막 (편집본 보고 설정 → 생성 → 검토/재생성) ── */}
+      {/* genPhase==='caption' && 아직 결과(captionedUrl) 없음 = 생성 중 → 진행 화면.
+          그 외 = CaptionPanel (결과 있으면 검토, 없으면 설정 폼). 둘 다 영상 좌 + 설정 우 2단. */}
+      {step === 'caption' && (
+        (genPhase === 'caption' && !captionedUrl) ? (
+          <ProgressPanel
+            job={mainJob}
+            estimate={estimate}
+            now={now}
+            projectId={projectId}
+            frames={previewFrames}
+            framesLoading={framesLoading}
+            fromStage={3}
+            toStage={3}
+            phaseLabel="자막 생성"
+            retryCount={mainRetry}
+            retryMax={MAX_RETRIES}
+            retrying={mainRetrying}
+            onReset={resetAll}
+          />
+        ) : (
+          <CaptionPanel
+            videoUrl={captionedUrl || gradedUrl}
+            generated={!!captionedUrl}
+            captionList={captionList}
+            brief={brief}
+            setBrief={setBrief}
+            extraNotes={extraNotes}
+            setExtraNotes={setExtraNotes}
+            genError={genError}
+            onBack={() => setStep('options')}
+            onGenerate={generateCaptions}
+            onNext={() => setStep('bgm')}
+          />
+        )
       )}
 
       {/* ── STEP: BGM 입히기 (편집 결과 미리보기 + 음원 선택) ── */}
@@ -864,12 +965,24 @@ function dedupeMerge(...arrs: string[][]): string[] {
 // ============================================================
 function StepIndicator({ step }: { step: Step }) {
   const idx = STEPS.findIndex(s => s.key === step);
+  // 8단계가 한 줄로 넘쳐 줄바꿈되므로 4개씩 끊어 2줄로 배치(둘 다 왼→오).
+  const perRow = 4;
+  const rows: { s: (typeof STEPS)[number]; i: number }[][] = [];
+  STEPS.forEach((s, i) => {
+    const r = Math.floor(i / perRow);
+    if (!rows[r]) rows[r] = [];
+    rows[r].push({ s, i });
+  });
   return (
     <div className="stepind">
-      {STEPS.map((s, i) => (
-        <div key={s.key} className={'sind ' + (i < idx ? 'done' : i === idx ? 'cur' : '')}>
-          <span className="dot">{i < idx ? '✓' : i + 1}</span>
-          <span className="lbl">{s.label}</span>
+      {rows.map((row, r) => (
+        <div key={r} className="stepind-row">
+          {row.map(({ s, i }) => (
+            <div key={s.key} className={'sind ' + (i < idx ? 'done' : i === idx ? 'cur' : '')}>
+              <span className="dot">{i < idx ? '✓' : i + 1}</span>
+              <span className="lbl">{s.label}</span>
+            </div>
+          ))}
         </div>
       ))}
     </div>
@@ -1658,6 +1771,129 @@ function FrameCarousel({ frames }: { frames: PreviewFrame[] }) {
 }
 
 // ============================================================
+// 자막 단계 — 영상(좌) + 설정·생성된 자막·재생성(우) 2단.
+//   generated=false : 편집본(graded) 보며 자막 설정 → "자막 생성"
+//   generated=true  : 캡션된 영상 + 생성된 자막 목록 확인 → "재생성" / "다음(BGM)"
+// ============================================================
+function CaptionPanel({
+  videoUrl, generated, captionList, brief, setBrief, extraNotes, setExtraNotes,
+  genError, onBack, onGenerate, onNext,
+}: {
+  videoUrl: string | null;
+  generated: boolean;
+  captionList: { start: number; layers: string[] }[];
+  brief: SuggestBrief;
+  setBrief: React.Dispatch<React.SetStateAction<SuggestBrief>>;
+  extraNotes: string;
+  setExtraNotes: (v: string) => void;
+  genError: string;
+  onBack: () => void;
+  onGenerate: () => void;
+  onNext: () => void;
+}) {
+  return (
+    <section className="card">
+      <div className="cardhead">
+        <span className="num">5</span>
+        <h2>자막 {generated
+          ? <small>(생성된 자막을 확인하고, 마음에 안 들면 재생성하세요)</small>
+          : <small>(편집본을 보고 자막 분위기·방식을 정하세요)</small>}</h2>
+      </div>
+
+      <div className="side-split">
+        {/* 좌 — 영상 미리보기 */}
+        <div className="side-video">
+          {videoUrl
+            ? <video className="side-video-el" src={videoUrl} controls playsInline loop muted={!generated} key={videoUrl} />
+            : <div className="side-video-ph">미리보기 준비 중…</div>}
+          <div className="side-video-tag">
+            {generated ? '🎬 자막까지 입힌 결과' : '🎬 편집본 (컷+보정) — 여기에 자막을 입힙니다'}
+          </div>
+        </div>
+
+        {/* 우 — 설정 + 생성된 자막 + 액션 */}
+        <div className="side-pane">
+          {generated && (
+            <div className="cap-review">
+              <div className="cap-review-head">📝 생성된 자막 <span className="cap-review-count">{captionList.length}컷</span></div>
+              {captionList.length === 0
+                ? <div className="cap-review-empty">이 영상엔 자막이 없어요 (자막 없음 설정이거나 레퍼런스에 자막이 없는 구간).</div>
+                : (
+                  <ul className="cap-review-list">
+                    {captionList.map((c, i) => (
+                      <li key={i} className="cap-review-item">
+                        <span className="cap-review-t">{fmtClock(c.start)}</span>
+                        <span className="cap-review-text">
+                          {c.layers.map((t, j) => (
+                            <span key={j} className="cap-review-line">{t.split('\n').join(' / ')}</span>
+                          ))}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+            </div>
+          )}
+
+          <div className="cap-settings">
+            <div className="grid">
+              <label>자막 언어
+                <select className="inp" value={brief.caption_language}
+                  onChange={e => setBrief(b => ({ ...b, caption_language: e.target.value as SuggestBrief['caption_language'] }))}>
+                  <option value="">레퍼런스 따라가기</option>
+                  <option value="ko">한국어</option>
+                  <option value="en">영어</option>
+                  <option value="mixed">한+영 혼합</option>
+                </select>
+              </label>
+              <label>자막 빈도
+                <select className="inp" value={brief.caption_density}
+                  onChange={e => setBrief(b => ({ ...b, caption_density: e.target.value as SuggestBrief['caption_density'] }))}>
+                  <option value="">레퍼런스 따라가기</option>
+                  <option value="every_cut">모든 컷</option>
+                  <option value="most_cuts">대부분 컷</option>
+                  <option value="occasional">가끔</option>
+                  <option value="minimal">최소</option>
+                  <option value="none">자막 없음</option>
+                </select>
+              </label>
+              <label>자막 텍스트 방식
+                <select className="inp" value={brief.caption_mode}
+                  onChange={e => setBrief(b => ({ ...b, caption_mode: e.target.value as SuggestBrief['caption_mode'] }))}>
+                  <option value="">레퍼런스 따라가기</option>
+                  <option value="per_scene">컷마다 다른 자막</option>
+                  <option value="brand_title">브랜드 타이틀 고정 + 훅 변주</option>
+                  <option value="continuous">하나의 타이틀 유지</option>
+                  <option value="none">자막 없음</option>
+                </select>
+              </label>
+            </div>
+            <label className="full">자막 메모 (분위기·상세)
+              <textarea className="inp" rows={2} placeholder="예: 감성적인 톤, 첫 컷에 가게 이름 크게"
+                value={extraNotes} onChange={e => setExtraNotes(e.target.value)} />
+            </label>
+            {generated && <p className="hint">설정·메모를 바꾸고 <b>재생성</b>하면 같은 컷에 자막만 다시 만들어요 (컷 재편집 없음).</p>}
+          </div>
+        </div>
+      </div>
+
+      {genError && <div className="err">{genError}</div>}
+      <div className="nav">
+        <button className="btn" onClick={onBack}>← 옵션</button>
+        {generated ? (
+          <div className="nav-group">
+            <button className="btn" onClick={onGenerate}>🔁 재생성</button>
+            <button className="btn primary" onClick={onNext}>다음 (BGM) →</button>
+          </div>
+        ) : (
+          <button className="btn primary" onClick={onGenerate}>자막 생성 →</button>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// ============================================================
 // BGM 고르기 — 레퍼런스 실제 BGM 정보 + 무료 추천 트랙 후보 + 미리듣기 + 선택
 // ============================================================
 function BgmPanel({
@@ -1705,16 +1941,20 @@ function BgmPanel({
     <section className="card">
       <div className="cardhead"><span className="num">6</span><h2>BGM 입히기</h2></div>
       <p className="hint">
-        컷편집 + 자막까지 끝난 결과예요. 아래 영상을 재생해두고 음원을 들어보며 어울리는 트랙을 고르세요. BGM 없이 진행할 수도 있어요.
+        컷편집 + 자막까지 끝난 결과예요. 왼쪽 영상을 재생해두고 오른쪽에서 음원을 들어보며 어울리는 트랙을 고르세요. BGM 없이 진행할 수도 있어요.
       </p>
 
-      {captionedUrl && (
-        <div className="bgm-preview">
-          <video className="bgm-preview-video" src={captionedUrl} controls playsInline loop muted />
-          <div className="bgm-preview-tag">🎬 편집 결과 (컷+자막) — 음원을 함께 재생해 어울리는지 확인</div>
+      <div className="side-split">
+        {/* 좌 — 편집 결과 영상 */}
+        <div className="side-video">
+          {captionedUrl
+            ? <video className="side-video-el" src={captionedUrl} controls playsInline loop muted key={captionedUrl} />
+            : <div className="side-video-ph">미리보기 준비 중…</div>}
+          <div className="side-video-tag">🎬 편집 결과 (컷+자막) — 음원과 함께 재생해 확인</div>
         </div>
-      )}
 
+        {/* 우 — 레퍼런스 음원 정보 + 후보 리스트 */}
+        <div className="side-pane">
       {ref && (ref.status === 'matched' || ref.status === 'no_match') && (
         <div className="ref-bgm">
           <div className="ref-bgm-head">🎵 레퍼런스 영상의 음원</div>
@@ -1793,6 +2033,8 @@ function BgmPanel({
           </div>
         </>
       )}
+        </div>{/* /side-pane */}
+      </div>{/* /side-split */}
 
       {genError && <div className="err">{genError}</div>}
       <div className="nav">

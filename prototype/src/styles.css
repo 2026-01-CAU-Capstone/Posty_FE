@@ -153,8 +153,11 @@ label.full { margin-top: 4px; }
 /* ============================================================
    단계 인디케이터 + 네비게이션 (마법사)
    ============================================================ */
-.stepind { display: flex; align-items: center; justify-content: center; gap: 6px; margin: 4px 0 18px; flex-wrap: wrap; }
+/* 단계 인디케이터 — 4개씩 끊어 2줄로 배치(둘 다 왼→오). */
+.stepind { display: flex; flex-direction: column; align-items: center; gap: 8px; margin: 4px 0 18px; }
+.stepind-row { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; }
 .sind { display: flex; align-items: center; gap: 7px; color: var(--mut); font-size: 13px; }
+/* 줄 안에서 항목 사이만 연결선. 각 줄의 마지막 항목엔 선을 그리지 않음. */
 .sind:not(:last-child)::after { content: ''; width: 18px; height: 2px; border-radius: 2px; background: var(--line); margin-left: 4px; }
 .sind .dot {
   width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
@@ -259,6 +262,58 @@ label.full { margin-top: 4px; }
   background: #000; border-radius: 12px; border: 1px solid var(--line);
 }
 .bgm-preview-tag { font-size: 12px; color: var(--mut); text-align: center; }
+
+/* ============================================================
+   2단 레이아웃 — 영상(좌) + 설정/목록(우). 자막·BGM 단계 공용.
+   ============================================================ */
+.side-split {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) 1fr;
+  gap: 22px;
+  align-items: start;
+  margin: 6px 0 4px;
+}
+.side-video {
+  position: sticky; top: 12px;
+  display: flex; flex-direction: column; gap: 7px;
+}
+.side-video-el {
+  width: 100%; aspect-ratio: 9 / 16;
+  background: #000; border-radius: 12px; border: 1px solid var(--line);
+}
+.side-video-ph {
+  width: 100%; aspect-ratio: 9 / 16;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,0.03); border: 1px dashed var(--line);
+  border-radius: 12px; color: var(--mut); font-size: 13px;
+}
+.side-video-tag { font-size: 11.5px; color: var(--mut); text-align: center; line-height: 1.4; }
+.side-pane { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+
+/* 자막 검토 — 생성된 컷별 자막 목록 */
+.cap-review {
+  border: 1px solid var(--line); border-radius: 12px;
+  background: rgba(255,255,255,0.02); padding: 10px 12px;
+}
+.cap-review-head { font-size: 13px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.cap-review-count {
+  font-size: 11px; color: var(--mut);
+  background: rgba(255,255,255,0.06); border-radius: 999px; padding: 1px 8px;
+}
+.cap-review-empty { font-size: 12.5px; color: var(--mut); }
+.cap-review-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
+.cap-review-item { display: flex; gap: 9px; align-items: baseline; font-size: 13px; }
+.cap-review-t { flex: 0 0 auto; font-variant-numeric: tabular-nums; color: var(--accent2); font-size: 11.5px; min-width: 42px; }
+.cap-review-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cap-review-line { word-break: break-word; }
+.cap-settings { display: flex; flex-direction: column; gap: 10px; }
+
+.nav-group { display: flex; gap: 8px; }
+
+@media (max-width: 620px) {
+  .side-split { grid-template-columns: 1fr; gap: 14px; }
+  .side-video { position: static; max-width: 280px; margin: 0 auto; }
+}
 
 /* ============================================================
    분석 상세 (말풍선 아래 항목별 분석)

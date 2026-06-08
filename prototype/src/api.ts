@@ -54,6 +54,7 @@ export type SuggestBrief = {
   must_include_phrases: string[];
   caption_language: '' | 'ko' | 'en' | 'mixed';
   caption_density: '' | 'every_cut' | 'most_cuts' | 'occasional' | 'minimal' | 'none';
+  caption_mode: '' | 'per_scene' | 'brand_title' | 'continuous' | 'none';
 };
 
 export type AnalysisPoint = {
@@ -85,6 +86,11 @@ export const TTS_VOICES = ['Kore', 'Puck', 'Charon', 'Aoede', 'Fenrir', 'Leda', 
 export type OriginalVolume = 'mute' | 'low' | 'full';
 export type AudioConfig = {
   originalVolume: OriginalVolume;
+};
+
+// 컷편집 설정 — lib/cut-config.ts 미러. target_sec: 0=레퍼런스 따라가기, >0=목표 길이(초).
+export type CutConfig = {
+  target_sec: number;
 };
 
 export type PreviewFrame = {
@@ -224,6 +230,11 @@ export const api = {
   // 오디오 밸런스(원본 음량) 저장
   async saveAudioConfig(projectId: string, audio: Partial<AudioConfig>): Promise<void> {
     await jsonReq('/api/audio-config', { method: 'POST', body: JSON.stringify({ projectId, audio }) });
+  },
+
+  // 컷편집 설정(영상 목표 길이 등) 저장
+  async saveCutConfig(projectId: string, cut: Partial<CutConfig>): Promise<void> {
+    await jsonReq('/api/cut-config', { method: 'POST', body: JSON.stringify({ projectId, cut }) });
   },
 
   // 레퍼런스 분석 결과(edit-spec.json) 전체 — 디버그 표시용
