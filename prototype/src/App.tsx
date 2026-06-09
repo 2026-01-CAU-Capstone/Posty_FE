@@ -245,6 +245,21 @@ export default function App() {
   const mainRunning = !!mainJob && mainJob.status !== 'done' && mainJob.status !== 'error';
   const now = useNow(stage0Running || mainRunning);
 
+  // Stage 0 의 "마지막 진행 시각" — hang 판정을 경과시간이 아니라 "진행이 멈춘 시간"으로 한다.
+  // (Stage 0 가 단계별 progress 를 내보내므로, 정상 진행 중이면 이 값이 계속 갱신된다.)
+  const stage0LastProgressMs = useMemo(() => {
+    const ps = stage0Job?.progress;
+    if (Array.isArray(ps) && ps.length > 0) {
+      const t = Date.parse(ps[ps.length - 1]?.at || '');
+      if (Number.isFinite(t)) return t;
+    }
+    if (stage0Job?.startedAt) {
+      const s = Date.parse(stage0Job.startedAt);
+      if (Number.isFinite(s)) return s;
+    }
+    return null; // 유효한 타임스탬프가 없으면 null → stall 타이머가 안전하게 noop.
+  }, [stage0Job?.progress, stage0Job?.startedAt]);
+
   // 최종 영상은 'final' 단계의 mainJob 이 끝났을 때만.
   const finalPath: string | null = (genPhase === 'final' && mainJob?.status === 'done') ? (mainJob.result?.final ?? null) : null;
 
@@ -407,17 +422,22 @@ export default function App() {
     return () => { clearTimeout(timer); setMainRetrying(false); };
   }, [mainJob?.status, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Hang 감지: 예상 시간 × 2.5 를 초과하면 강제 재시작 ───────
-  // (apt timeout for stuck network/API rather than waiting forever)
+  // ── Hang 감지: "진행이 멈춘" 경우에만 강제 재시작 (느린 건 그대로 둔다) ───────
+  // 예전엔 "경과 > 추정×2.5" 로 판정해, 진행 중인데 추정보다 느릴 뿐인 Stage 0 를 죽여
+  // 진행률이 99%→2% 로 리셋되는 루프를 만들었다(추정이 실제보다 짧을 때). 이제 "마지막 진행
+  // 이후 STALL_MS 동안 새 진행이 없을 때"만 멈춤으로 보고 재시작한다. Stage 0 가 단계별
+  // progress 를 내보내므로 정상 진행 중엔 타이머가 계속 갱신돼 재시작되지 않는다.
   useEffect(() => {
-    if (!projectId || !estimate) return;
+    if (!projectId) return;
     if (stage0Job?.status !== 'running') return;
     if (stage0Retry >= MAX_RETRIES) return;
-    const start = stage0Job.startedAt ? Date.parse(stage0Job.startedAt) : Date.now();
-    const expected = estimate.perStage[0] || 60;
-    const hangAfter = expected * 2.5 * 1000;
-    const elapsed = Date.now() - start;
-    const remaining = Math.max(1000, hangAfter - elapsed);
+    if (stage0LastProgressMs == null) return;
+    // STALL_MS: 단계 사이 정상 간격(업로드+ACTIVE 대기+pro 영상 호출 1회, 재시도 포함)이
+    // 수 분에 달할 수 있어 넉넉히 15분으로 둔다. 백엔드가 타임아웃/네트워크 에러를 자체
+    // 재시도로 흡수하므로, 이 stall 재시작은 사실상 최후의 안전장치다.
+    // (게다가 백엔드 dedup 덕에 진행 중 잡엔 재시작이 같은 잡으로 합쳐져 무해하다.)
+    const STALL_MS = 900_000;
+    const remaining = Math.max(5000, STALL_MS - (Date.now() - stage0LastProgressMs));
     const timer = setTimeout(async () => {
       try {
         const newId = await api.run(projectId, { mode: 'stage', stage: 0 });
@@ -426,7 +446,7 @@ export default function App() {
       } catch { /* 다음 사이클 */ }
     }, remaining);
     return () => clearTimeout(timer);
-  }, [stage0Job?.id, stage0Job?.status, projectId, estimate]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [stage0Job?.status, stage0LastProgressMs, projectId, stage0Retry]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 완료 시 브라우저 알림 (최종 영상 완성 시에만)
   useEffect(() => {
@@ -1021,6 +1041,18 @@ function WaitingPanel({
   const { pct, eta } = phaseProgress(stage0Job, estimate?.perStage ?? null, 0, 0, now);
   const pctInt = done ? 100 : Math.round(pct * 100);
 
+  // 현재 분석 단계 메시지 — Stage 0 가 단계별로 보고하는 progress 의 최신 항목.
+  // (시간추정만 따라가는 % 가 99%에서 멈춘 것처럼 보일 때 "지금 뭘 하는 중"인지 보여준다.)
+  const stage0SubMsg = (() => {
+    const ps = stage0Job?.progress;
+    if (!Array.isArray(ps)) return '';
+    for (let i = ps.length - 1; i >= 0; i--) {
+      const step = String(ps[i]?.step || '');
+      if (step.startsWith('stage0_') && step !== 'stage0_start' && step !== 'stage0_done') return String(ps[i]?.msg || '');
+    }
+    return '';
+  })();
+
   return (
     <section className="card progress">
       <div className="cardhead"><span className="num">3</span><h2>레퍼런스 분석</h2></div>
@@ -1038,6 +1070,7 @@ function WaitingPanel({
             : <>
                 <div className="pct">{pctInt}%</div>
                 <div className="eta">{fmtClockRange(eta)}</div>
+                {stage0SubMsg && <div className="eta">{stage0SubMsg}…</div>}
               </>
         }
       </div>
