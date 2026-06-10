@@ -121,6 +121,7 @@ export type FamousTrack = {
   preview_url?: string;   // 30초 미리듣기 (m4a)
   artwork?: string;       // 앨범 아트 썸네일
   verified?: boolean;     // iTunes 실존 확인됨
+  duration_sec?: number;  // 곡 전체 길이(초) — iTunes trackTimeMillis
 };
 
 export type ReferenceBgm = {
