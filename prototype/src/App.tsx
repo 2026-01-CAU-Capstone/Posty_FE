@@ -657,6 +657,12 @@ export default function App() {
 
     setBgmPickBusy(true);
     setGenError('');
+    // 확인 '즉시' 최종 로딩 화면을 띄운다 — bgm-pick 다운로드 + stage4 동안 BGM 화면에 멈춘 듯
+    // 보이지 않게. ProgressPanel 은 job=null 이면 0% 로딩으로 표시되고, 잡이 생기면 진행률이 채워진다.
+    setMainJobId(null);
+    setMainRetry(0); setMainRetrying(false);
+    completedNotifiedRef.current = false;
+    setStep('final');
     try {
       if (bgmPick === 'none') {
         await api.pickBgm(projectId, { none: true });
@@ -671,12 +677,10 @@ export default function App() {
       }
       const jobId = await api.run(projectId, { mode: 'all', from: 4, to: 4 });
       setGenPhase('final');
-      setMainRetry(0); setMainRetrying(false);
-      completedNotifiedRef.current = false;
       setMainJobId(jobId);
-      setStep('final');
     } catch (e: any) {
       setGenError(e.message || String(e));
+      setStep('bgm');   // 실패 시 BGM 화면으로 복귀해 다시 시도할 수 있게
     } finally {
       setBgmPickBusy(false);
     }
