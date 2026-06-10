@@ -1829,7 +1829,7 @@ function CaptionPanel({
   return (
     <section className="card">
       <div className="cardhead">
-        <span className="num">5</span>
+        <span className="num">6</span>
         <h2>자막 {generated
           ? <small>(생성된 자막을 확인하고, 마음에 안 들면 재생성하세요)</small>
           : <small>(편집본을 보고 자막 분위기·방식을 정하세요)</small>}</h2>
@@ -1975,7 +1975,7 @@ function BgmPanel({
 
   return (
     <section className="card">
-      <div className="cardhead"><span className="num">6</span><h2>BGM 입히기</h2></div>
+      <div className="cardhead"><span className="num">7</span><h2>BGM 입히기</h2></div>
       <p className="hint">
         컷편집 + 자막까지 끝난 결과예요. 왼쪽 영상을 재생해두고 오른쪽에서 음원을 들어보며 어울리는 트랙을 고르세요. BGM 없이 진행할 수도 있어요.
       </p>
