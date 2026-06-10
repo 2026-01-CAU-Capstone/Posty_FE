@@ -265,9 +265,13 @@ export default function App() {
 
   useEffect(() => { api.health().then(setOnline); }, []);
 
-  // 'bgm' 화면 진입 시 후보 자동 fetch (Stage 0 가 끝나 있어야 함)
+  // BGM 후보 백그라운드 선행 fetch — BGM 검색(AudD+Archive+Gemini)은 오래 걸려서 'bgm' 화면
+  // 도착 후 받으면 한참 기다린다. → Stage 0 가 끝나면(옵션 단계부터) 곧바로 백그라운드로 받아
+  // 캐시(4_final/bgm-candidates.json)를 데워둔다. 옵션 작성 + 편집·자막 렌더(보통 수 분) 동안
+  // 미리 완료되므로 자막→BGM 진입 시 '즉시' 뜬다(창을 미리 준비).
+  // (Stage 0 가 끝나 audio_profile 이 있어야 가능. 중복 fetch 는 bgmResp/bgmBusy 가드로 방지.)
   useEffect(() => {
-    if (step !== 'bgm') return;
+    if (step !== 'options' && step !== 'edit' && step !== 'caption' && step !== 'bgm') return;
     if (!projectId || !stage0Done) return;
     if (bgmResp || bgmBusy) return;
     let cancelled = false;
@@ -284,7 +288,9 @@ export default function App() {
       } catch (e: any) {
         if (!cancelled) setBgmError(e.message || String(e));
       } finally {
-        if (!cancelled) setBgmBusy(false);
+        // step 이동으로 cancelled 돼도 busy 는 '항상' 해제 — 안 그러면 busy 가 stuck 돼
+        // (편집→자막→bgm 이동 중 흔함) 다음 fetch 가 영영 막힌다. (백엔드 캐시라 재요청도 저렴.)
+        setBgmBusy(false);
       }
     })();
     return () => { cancelled = true; };
