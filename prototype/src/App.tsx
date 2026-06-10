@@ -1041,17 +1041,8 @@ function WaitingPanel({
   const { pct, eta } = phaseProgress(stage0Job, estimate?.perStage ?? null, 0, 0, now);
   const pctInt = done ? 100 : Math.round(pct * 100);
 
-  // 현재 분석 단계 메시지 — Stage 0 가 단계별로 보고하는 progress 의 최신 항목.
-  // (시간추정만 따라가는 % 가 99%에서 멈춘 것처럼 보일 때 "지금 뭘 하는 중"인지 보여준다.)
-  const stage0SubMsg = (() => {
-    const ps = stage0Job?.progress;
-    if (!Array.isArray(ps)) return '';
-    for (let i = ps.length - 1; i >= 0; i--) {
-      const step = String(ps[i]?.step || '');
-      if (step.startsWith('stage0_') && step !== 'stage0_start' && step !== 'stage0_done') return String(ps[i]?.msg || '');
-    }
-    return '';
-  })();
+  // (단계별 상세 진행 메시지는 사용자 화면에 직접 노출하지 않고, 아래 접이식 로그(DebugLog)
+  //  '▸ 로그 확인' 을 펼쳤을 때만 보이게 한다. 기본 화면은 마스코트 + % + 예상시간만.)
 
   return (
     <section className="card progress">
@@ -1070,7 +1061,6 @@ function WaitingPanel({
             : <>
                 <div className="pct">{pctInt}%</div>
                 <div className="eta">{fmtClockRange(eta)}</div>
-                {stage0SubMsg && <div className="eta">{stage0SubMsg}…</div>}
               </>
         }
       </div>
@@ -1152,6 +1142,10 @@ function WaitingPanel({
           onClick={onNext}
         >옵션 채우러 가기 →</button>
       </div>
+
+      {/* 진행 로그 — '레퍼런스 메인+자막 분석 중' 같은 단계 메시지는 평소엔 숨기고,
+          '▸ 로그 확인' 을 펼쳤을 때만 보이게 한다(사용자 화면 깔끔). */}
+      <DebugLog job={stage0Job} projectId={stage0Job?.projectId ?? null} active={!done && !failed} />
 
       {/* 디버그 전용 — 정확한 남은 시간 / raw 진행률은 사용자에게 노출하지 않고
           이 토글을 펼쳤을 때만 보이도록 분리. 평소엔 접혀 있음. */}
