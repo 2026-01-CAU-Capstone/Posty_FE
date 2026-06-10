@@ -265,9 +265,13 @@ export default function App() {
 
   useEffect(() => { api.health().then(setOnline); }, []);
 
-  // 'bgm' 화면 진입 시 후보 자동 fetch (Stage 0 가 끝나 있어야 함)
+  // BGM 후보 백그라운드 선행 fetch — BGM 검색(AudD+Archive+Gemini)은 오래 걸려서 'bgm' 화면
+  // 도착 후 받으면 한참 기다린다. → Stage 0 가 끝나면(옵션 단계부터) 곧바로 백그라운드로 받아
+  // 캐시(4_final/bgm-candidates.json)를 데워둔다. 옵션 작성 + 편집·자막 렌더(보통 수 분) 동안
+  // 미리 완료되므로 자막→BGM 진입 시 '즉시' 뜬다(창을 미리 준비).
+  // (Stage 0 가 끝나 audio_profile 이 있어야 가능. 중복 fetch 는 bgmResp/bgmBusy 가드로 방지.)
   useEffect(() => {
-    if (step !== 'bgm') return;
+    if (step !== 'options' && step !== 'edit' && step !== 'caption' && step !== 'bgm') return;
     if (!projectId || !stage0Done) return;
     if (bgmResp || bgmBusy) return;
     let cancelled = false;
@@ -284,7 +288,9 @@ export default function App() {
       } catch (e: any) {
         if (!cancelled) setBgmError(e.message || String(e));
       } finally {
-        if (!cancelled) setBgmBusy(false);
+        // step 이동으로 cancelled 돼도 busy 는 '항상' 해제 — 안 그러면 busy 가 stuck 돼
+        // (편집→자막→bgm 이동 중 흔함) 다음 fetch 가 영영 막힌다. (백엔드 캐시라 재요청도 저렴.)
+        setBgmBusy(false);
       }
     })();
     return () => { cancelled = true; };
@@ -651,6 +657,12 @@ export default function App() {
 
     setBgmPickBusy(true);
     setGenError('');
+    // 확인 '즉시' 최종 로딩 화면을 띄운다 — bgm-pick 다운로드 + stage4 동안 BGM 화면에 멈춘 듯
+    // 보이지 않게. ProgressPanel 은 job=null 이면 0% 로딩으로 표시되고, 잡이 생기면 진행률이 채워진다.
+    setMainJobId(null);
+    setMainRetry(0); setMainRetrying(false);
+    completedNotifiedRef.current = false;
+    setStep('final');
     try {
       if (bgmPick === 'none') {
         await api.pickBgm(projectId, { none: true });
@@ -665,12 +677,10 @@ export default function App() {
       }
       const jobId = await api.run(projectId, { mode: 'all', from: 4, to: 4 });
       setGenPhase('final');
-      setMainRetry(0); setMainRetrying(false);
-      completedNotifiedRef.current = false;
       setMainJobId(jobId);
-      setStep('final');
     } catch (e: any) {
       setGenError(e.message || String(e));
+      setStep('bgm');   // 실패 시 BGM 화면으로 복귀해 다시 시도할 수 있게
     } finally {
       setBgmPickBusy(false);
     }
@@ -1041,17 +1051,8 @@ function WaitingPanel({
   const { pct, eta } = phaseProgress(stage0Job, estimate?.perStage ?? null, 0, 0, now);
   const pctInt = done ? 100 : Math.round(pct * 100);
 
-  // 현재 분석 단계 메시지 — Stage 0 가 단계별로 보고하는 progress 의 최신 항목.
-  // (시간추정만 따라가는 % 가 99%에서 멈춘 것처럼 보일 때 "지금 뭘 하는 중"인지 보여준다.)
-  const stage0SubMsg = (() => {
-    const ps = stage0Job?.progress;
-    if (!Array.isArray(ps)) return '';
-    for (let i = ps.length - 1; i >= 0; i--) {
-      const step = String(ps[i]?.step || '');
-      if (step.startsWith('stage0_') && step !== 'stage0_start' && step !== 'stage0_done') return String(ps[i]?.msg || '');
-    }
-    return '';
-  })();
+  // (단계별 상세 진행 메시지는 사용자 화면에 직접 노출하지 않고, 아래 접이식 로그(DebugLog)
+  //  '▸ 로그 확인' 을 펼쳤을 때만 보이게 한다. 기본 화면은 마스코트 + % + 예상시간만.)
 
   return (
     <section className="card progress">
@@ -1070,7 +1071,6 @@ function WaitingPanel({
             : <>
                 <div className="pct">{pctInt}%</div>
                 <div className="eta">{fmtClockRange(eta)}</div>
-                {stage0SubMsg && <div className="eta">{stage0SubMsg}…</div>}
               </>
         }
       </div>
@@ -1152,6 +1152,10 @@ function WaitingPanel({
           onClick={onNext}
         >옵션 채우러 가기 →</button>
       </div>
+
+      {/* 진행 로그 — '레퍼런스 메인+자막 분석 중' 같은 단계 메시지는 평소엔 숨기고,
+          '▸ 로그 확인' 을 펼쳤을 때만 보이게 한다(사용자 화면 깔끔). */}
+      <DebugLog job={stage0Job} projectId={stage0Job?.projectId ?? null} active={!done && !failed} />
 
       {/* 디버그 전용 — 정확한 남은 시간 / raw 진행률은 사용자에게 노출하지 않고
           이 토글을 펼쳤을 때만 보이도록 분리. 평소엔 접혀 있음. */}
@@ -1829,7 +1833,7 @@ function CaptionPanel({
   return (
     <section className="card">
       <div className="cardhead">
-        <span className="num">5</span>
+        <span className="num">6</span>
         <h2>자막 {generated
           ? <small>(생성된 자막을 확인하고, 마음에 안 들면 재생성하세요)</small>
           : <small>(편집본을 보고 자막 분위기·방식을 정하세요)</small>}</h2>
@@ -1949,8 +1953,19 @@ function BgmPanel({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playingId, setPlayingId] = useState<string | null>(null);
 
+  // 유료 곡 선택 — 저작권상 영상엔 못 넣으므로 '미리듣기 전용 선택'(렌더 pick 은 'none' 으로 둠).
+  const [paidIdx, setPaidIdx] = useState<number | null>(null);
+
+  // 영상 + 음원 동시 재생(미리듣기) — "이 음원을 깔면 어떻게 보이고 들리는지" 확인용 + 경과 초.
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const comboAudioRef = useRef<HTMLAudioElement | null>(null);
+  const comboTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [comboOn, setComboOn] = useState(false);
+  const [comboT, setComboT] = useState(0);
+
   // 한 번에 하나만 재생 — 무료 후보(source_url)와 유료 추천 미리듣기(preview_url) 공용.
   const playUrl = (id: string, url: string) => {
+    stopCombo();                                  // 동시재생 중이면 멈추고 단독 미리듣기로 전환
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current = null;
@@ -1968,14 +1983,60 @@ function BgmPanel({
     setPlayingId(id);
   };
 
-  useEffect(() => () => { audioRef.current?.pause(); }, []);
+  // 현재 '선택된' 음원의 재생 URL (무료 source / 유료 preview). BGM 없음이면 null.
+  const selectedBgmUrl = (): string | null => {
+    if (paidIdx != null) return resp?.paid[paidIdx]?.preview_url ?? null;
+    if (pick && pick !== 'none') return resp?.free.find(c => c.identifier === pick)?.source_url ?? null;
+    return null;
+  };
+  const selectedBgmLabel = (): string => {
+    if (paidIdx != null) { const t = resp?.paid[paidIdx]; return t ? `${t.title} — ${t.artist} (유료·미리듣기 전용)` : ''; }
+    if (pick && pick !== 'none') return resp?.free.find(c => c.identifier === pick)?.title || '선택한 무료 음원';
+    return '';
+  };
+
+  function stopCombo() {
+    if (comboTimerRef.current) { clearInterval(comboTimerRef.current); comboTimerRef.current = null; }
+    if (comboAudioRef.current) { comboAudioRef.current.pause(); comboAudioRef.current = null; }
+    videoRef.current?.pause();
+    setComboOn(false);
+  }
+  const startCombo = () => {
+    const url = selectedBgmUrl();
+    if (!url) return;                             // BGM 없음이면 동시재생 의미 없음
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+    setPlayingId(null);
+    const v = videoRef.current;
+    if (!v) return;
+    // 최종 기본(원본 음소거 + 음원만)처럼 — 영상은 muted, 음원을 입혀 들려준다.
+    v.muted = true;
+    try { v.currentTime = 0; } catch { /* noop */ }
+    v.play().catch(() => {});
+    const a = new Audio(url);
+    a.volume = 0.85;
+    a.play().catch(() => {});
+    comboAudioRef.current = a;
+    setComboT(0);
+    comboTimerRef.current = setInterval(() => setComboT(videoRef.current?.currentTime ?? 0), 200);
+    v.onended = () => stopCombo();                // 영상이 끝나면 동시재생 종료
+    a.onended = () => { /* 음원(30초 등)이 먼저 끝나도 영상은 계속 — 상태 유지 */ };
+    setComboOn(true);
+  };
+  const toggleCombo = () => { comboOn ? stopCombo() : startCombo(); };
+
+  // 선택 변경 — 무료/유료/none. 선택이 바뀌면 음원이 달라지므로 동시재생을 멈춘다.
+  const selectFree = (id: string) => { setPaidIdx(null); setPick(id); stopCombo(); };
+  const selectPaid = (i: number) => { setPaidIdx(i); setPick('none'); stopCombo(); };   // 렌더는 BGM 없음
+  const selectNone = () => { setPaidIdx(null); setPick('none'); stopCombo(); };
+
+  useEffect(() => () => { audioRef.current?.pause(); stopCombo(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const ref = resp?.referenceBgm;
   const refKnown = ref && ref.status === 'matched';
 
   return (
     <section className="card">
-      <div className="cardhead"><span className="num">6</span><h2>BGM 입히기</h2></div>
+      <div className="cardhead"><span className="num">7</span><h2>BGM 입히기</h2></div>
       <p className="hint">
         컷편집 + 자막까지 끝난 결과예요. 왼쪽 영상을 재생해두고 오른쪽에서 음원을 들어보며 어울리는 트랙을 고르세요. BGM 없이 진행할 수도 있어요.
       </p>
@@ -1984,9 +2045,21 @@ function BgmPanel({
         {/* 좌 — 편집 결과 영상 */}
         <div className="side-video">
           {captionedUrl
-            ? <video className="side-video-el" src={captionedUrl} controls playsInline loop muted key={captionedUrl} />
+            ? <video ref={videoRef} className="side-video-el" src={captionedUrl} controls playsInline muted key={captionedUrl} />
             : <div className="side-video-ph">미리보기 준비 중…</div>}
-          <div className="side-video-tag">🎬 편집 결과 (컷+자막) — 음원과 함께 재생해 확인</div>
+          <div className="side-video-tag">🎬 편집 결과 (컷+자막)</div>
+          {/* 영상 + 선택한 음원 동시 재생 — '깔았을 때' 모습·소리 확인 + 경과 초 표시 */}
+          <div className="combo-bar">
+            <button
+              type="button"
+              className={'btn combo-btn' + (comboOn ? ' on' : '')}
+              disabled={!captionedUrl || !selectedBgmUrl()}
+              onClick={toggleCombo}
+            >{comboOn ? '⏸ 멈추기' : '▶ 영상 + 음원 함께 듣기'}</button>
+            {selectedBgmUrl()
+              ? <span className="combo-label">{comboOn ? `${fmtDur(comboT) || '0:00'} · ` : ''}{selectedBgmLabel()}</span>
+              : <span className="combo-label muted">음원을 선택하면 영상과 함께 들어볼 수 있어요</span>}
+          </div>
         </div>
 
         {/* 우 — 레퍼런스 음원 정보 + 후보 리스트 */}
@@ -2026,8 +2099,13 @@ function BgmPanel({
                 {resp.paid.map((t, i) => {
                   const pid = 'paid:' + i;
                   const playing = playingId === pid;
+                  const selected = paidIdx === i;
                   return (
-                    <div key={i} className="bgm-paid-item">
+                    <div key={i} className={'bgm-paid-item' + (selected ? ' on' : '')}>
+                      <label className="bgm-item-pick">
+                        <input type="radio" name="bgm-pick" checked={selected} onChange={() => selectPaid(i)} />
+                        <span className="bgm-radio" />
+                      </label>
                       {t.artwork
                         ? <img className="bgm-art" src={t.artwork} alt="" />
                         : <span className="bgm-rank">{i + 1}</span>}
@@ -2041,7 +2119,7 @@ function BgmPanel({
                       )}
                       <div className="bgm-meta">
                         <div className="bgm-title">{t.title} <span className="bgm-artist">— {t.artist}</span></div>
-                        <div className="bgm-sub">{[t.genre, t.year].filter(Boolean).join(' · ')}{t.verified ? ' · ✓ 확인됨' : ''}</div>
+                        <div className="bgm-sub">{[fmtDur(t.duration_sec ?? 0), t.genre, t.year].filter(Boolean).join(' · ')}{t.verified ? ' · ✓ 확인됨' : ''}</div>
                         {t.reason && <div className="bgm-reason">{t.reason}</div>}
                       </div>
                       <div className="bgm-paid-links">
@@ -2053,6 +2131,9 @@ function BgmPanel({
                   );
                 })}
               </div>
+              {paidIdx != null && (
+                <div className="bgm-paid-note">⚠ 유료 곡은 저작권상 영상에 넣을 수 없어요. <b>미리듣기 전용</b> — 위 “▶ 영상 + 음원 함께 듣기”로 느낌만 확인하고, 최종 영상은 <b>BGM 없이</b> 나갑니다.</div>
+              )}
             </div>
           )}
 
@@ -2061,12 +2142,12 @@ function BgmPanel({
             <div className="bgm-section-head">🆓 무료 음원 <span className="bgm-section-sub">선택하면 영상에 입혀져요</span></div>
             <div className="bgm-list">
               {resp.free.map((c, i) => {
-                const checked = pick === c.identifier;
+                const checked = paidIdx == null && pick === c.identifier;
                 const playing = playingId === c.identifier;
                 return (
                   <div key={c.identifier} className={'bgm-item' + (checked ? ' on' : '')}>
                     <label className="bgm-item-pick">
-                      <input type="radio" name="bgm-pick" checked={checked} onChange={() => setPick(c.identifier)} />
+                      <input type="radio" name="bgm-pick" checked={checked} onChange={() => selectFree(c.identifier)} />
                       <span className="bgm-radio" />
                     </label>
                     <button
@@ -2083,9 +2164,9 @@ function BgmPanel({
                 );
               })}
               {resp.free.length === 0 && <div className="bgm-empty">어울리는 무료 음원을 찾지 못했어요. 위 추천 곡을 참고하거나 BGM 없이 진행하세요.</div>}
-              <div className={'bgm-item bgm-none' + (pick === 'none' ? ' on' : '')}>
+              <div className={'bgm-item bgm-none' + (paidIdx == null && pick === 'none' ? ' on' : '')}>
                 <label className="bgm-item-pick">
-                  <input type="radio" name="bgm-pick" checked={pick === 'none'} onChange={() => setPick('none')} />
+                  <input type="radio" name="bgm-pick" checked={paidIdx == null && pick === 'none'} onChange={selectNone} />
                   <span className="bgm-radio" />
                 </label>
                 <div className="bgm-meta">
