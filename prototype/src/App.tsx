@@ -266,11 +266,12 @@ export default function App() {
   useEffect(() => { api.health().then(setOnline); }, []);
 
   // BGM 후보 백그라운드 선행 fetch — BGM 검색(AudD+Archive+Gemini)은 오래 걸려서 'bgm' 화면
-  // 도착 후 받으면 한참 기다린다. → 편집(edit)/자막(caption) 단계(무거운 렌더가 도는 동안)부터
-  // 미리 받아 캐시(4_final/bgm-candidates.json)를 데워두고, bgm 도착 시 즉시 표시한다.
+  // 도착 후 받으면 한참 기다린다. → Stage 0 가 끝나면(옵션 단계부터) 곧바로 백그라운드로 받아
+  // 캐시(4_final/bgm-candidates.json)를 데워둔다. 옵션 작성 + 편집·자막 렌더(보통 수 분) 동안
+  // 미리 완료되므로 자막→BGM 진입 시 '즉시' 뜬다(창을 미리 준비).
   // (Stage 0 가 끝나 audio_profile 이 있어야 가능. 중복 fetch 는 bgmResp/bgmBusy 가드로 방지.)
   useEffect(() => {
-    if (step !== 'edit' && step !== 'caption' && step !== 'bgm') return;
+    if (step !== 'options' && step !== 'edit' && step !== 'caption' && step !== 'bgm') return;
     if (!projectId || !stage0Done) return;
     if (bgmResp || bgmBusy) return;
     let cancelled = false;
